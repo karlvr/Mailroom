@@ -741,7 +741,7 @@ export function landingPage(app: string, origin: string, configured: boolean) {
 ${
   configured
     ? `<div class="row"><a class="btn big" href="/login">Sign in with Google${ICON.arrow}</a><a class="btn big secondary" href="/setup">Admin setup</a></div>
-<p class="fine">Each person signs in with Google and sees only their own mailboxes.</p>`
+<p class="fine">Each person signs in with Google and sees only their own mailboxes. You must trust the operator of this ${a}, because the operator can get access to the mailboxes that you link. Read the <a href="/privacy">privacy policy</a>.</p>`
     : `<div class="row"><a class="btn big" href="/setup">Start setup${ICON.arrow}</a></div>
 <p class="fine">${a} is not connected to Google yet.</p>`
 }
@@ -760,7 +760,7 @@ ${
 </div>
 <div class="facts">
 ${fact(1, "Hosting", `${a} runs on the Cloudflare account of the person or organisation that deployed it.`)}
-${fact(2, "Credentials", `${a} encrypts the Google tokens that it stores.`)}
+${fact(2, "Credentials", `${a} encrypts the Google tokens that it stores. The operator of this ${a} can decrypt the tokens, so you must trust the operator. Read the <a href="/privacy">privacy policy</a>.`)}
 ${fact(3, "Sending", `Claude can send email, send calendar invitations and reply to invitations only from an account where you allow it. Claude cannot delete email permanently.`)}
 ${fact(4, "Content", `${a} instructs Claude to treat email and calendar content as data, never as instructions.`)}
 </div>`,
@@ -796,6 +796,11 @@ ${section(
 <li><b>Anthropic</b> receives the email and calendar data that ${a} sends to Claude. The <a href="https://www.anthropic.com/legal/privacy" target="_blank" rel="noopener">Anthropic privacy policy</a> and your Claude settings apply to that data.</li>
 <li><b>Cloudflare</b> runs ${a} and stores its data. Cloudflare can keep request logs.</li></ul>
 <p>${a} does not send your data to other parties.</p>`,
+)}
+${section(
+  "Who can access your mailboxes",
+  `<p>The person or organisation that operates ${a} can decrypt the Google tokens that ${a} stores. The operator can also change the code of ${a}. Thus the operator can get all the access to your mailboxes and calendars that you gave to ${a}. The settings of a mailbox do not limit the operator.</p>
+<p>${a} encrypts the tokens to protect them if a copy of the database leaks. The encryption does not protect the tokens from the operator. Link a mailbox only if you trust the operator.</p>`,
 )}
 ${section(
   "Remove your data",

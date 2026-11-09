@@ -183,7 +183,7 @@ For a second barrier in front of the setup page, you can protect the `/setup` pa
 
 On the setup page, the **Who can use this** list can contain full addresses (`ana@example.com`) or whole domains (`@example.com`). Each person signs in with Google and links their own mailboxes. A person sees only their own mailboxes. Each Claude access token belongs to the person who approved it.
 
-For a separate deployment, a person can click **Deploy to Cloudflare** with their own Cloudflare account.
+Each person must trust the operator of the deployment, because the operator can get access to their mailboxes. Read [Security model](#security-model). For a separate deployment, a person can click **Deploy to Cloudflare** with their own Cloudflare account.
 
 ## Updating
 
@@ -230,7 +230,8 @@ npm run deploy
 
 ## Security model
 
-- **Stored secrets:** Mailroom encrypts the Google refresh tokens and the OAuth client secret with AES-GCM, and stores them in D1. Mailroom derives the key from `ADMIN_PASSWORD` with PBKDF2 and a random salt for each deployment. A copy of the database alone is not sufficient to decrypt the secrets.
+- **Trust in the operator:** The operator of a deployment knows `ADMIN_PASSWORD` and can read D1, so the operator can decrypt the stored tokens. The operator can also change the code. Thus the operator can get all the access to each linked mailbox and calendar that Mailroom has. The settings of a mailbox do not limit the operator. Each person who links a mailbox must trust the operator. The privacy policy at `/privacy` tells each person this.
+- **Stored secrets:** Mailroom encrypts the Google refresh tokens and the OAuth client secret with AES-GCM, and stores them in D1. Mailroom derives the key from `ADMIN_PASSWORD` with PBKDF2 and a random salt for each deployment. A copy of the database alone is not sufficient to decrypt the secrets. The encryption protects the secrets if a copy of the database leaks, but it does not protect them from the operator.
 - **Google access tokens:** Mailroom keeps these tokens only in Worker memory.
 - **Gmail permission:** Mailroom uses Google's `gmail.modify` permission. This permission allows Mailroom to read, label, draft, send and trash email, but not to delete email permanently. `send_draft` works only for a mailbox where the owner selected **Allow sending email**.
 - **Calendar permissions:** Mailroom uses Google's `calendar.events`, `calendar.calendarlist.readonly` and `calendar.events.freebusy` permissions. These permissions allow Mailroom to read and change events, list calendars and find busy times. They do not allow Mailroom to change the sharing of a calendar or to delete a calendar. Mailroom sends invitations and replies only for a mailbox where the owner selected the setting for that action.
