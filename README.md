@@ -189,6 +189,8 @@ For a separate deployment, a person can click **Deploy to Cloudflare** with thei
 
 An update keeps your `ADMIN_PASSWORD`, your settings and your linked mailboxes. `npm run deploy` applies new database migrations before it deploys the new code.
 
+To see what an update changes, open **Release notes** in the footer of each page, or go to `/release-notes`. When an update adds tools, Claude gets the new tools only after you reconnect Mailroom: in Claude, open **Customize → Connectors**, disconnect Mailroom, and then connect it again.
+
 An update can add a setup step or change one. Then the Mailboxes page shows a notice until the admin completes the new steps. To complete them:
 
 1. Open the setup page. Each page has an **Admin setup** link in the footer, or you can go to `/setup`.
@@ -247,6 +249,10 @@ npm run typecheck
 `npm run dev` applies the migrations to the local database before it starts the Worker.
 
 For local sign-in, add `http://localhost:8787/google/callback` to **Authorized redirect URIs** in your OAuth client.
+
+### Release notes
+
+Add each change that a person who uses Mailroom needs to know about to `src/release-notes.ts`, in the same commit as the change. Examples are a new ability, a new setting, or an action that the person or the admin must do. Do not add design changes, changes that a person does not notice, or internal changes. Write one short sentence in plain text, so that an agent can read it out to the user. Put all the changes of one day under one date.
 
 ### Database changes
 

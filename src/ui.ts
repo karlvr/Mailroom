@@ -12,6 +12,7 @@ import {
   grantedScopes,
 } from "./db";
 import { diffWords } from "./diff";
+import { RELEASE_NOTES } from "./release-notes";
 import { hasCalendar } from "./google";
 
 export const esc = (v: unknown) =>
@@ -444,7 +445,7 @@ ${Object.values(APP_ICONS)
 <main class="${opts.width ?? "text"}">
 ${body}
 </main>
-<footer class="foot"><div><span>${app} is a self-hosted mailbox and calendar connector for Claude. Claude can send email and calendar invitations only from an account where you allow it.</span><span><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/costs">Costs</a> · <a href="/setup">Admin setup</a></span></div></footer>
+<footer class="foot"><div><span>${app} is a self-hosted mailbox and calendar connector for Claude. Claude can send email and calendar invitations only from an account where you allow it.</span><span><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/costs">Costs</a> · <a href="/release-notes">Release notes</a> · <a href="/setup">Admin setup</a></span></div></footer>
 </div><script>${COPY_JS};${TIME_JS}</script></body></html>`;
   return new Response(html, {
     headers: {
@@ -875,6 +876,21 @@ ${section(
 <p>This page is for information only. It can be incomplete or out of date.</p>
 <p>The authors of the Mailroom software supply it under the <a href="https://github.com/karlvr/mailroom/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>, “as is”, without warranty of any kind. The licence also states that the authors are not liable for any claim, damages or other liability in connection with the software. To the extent that the law permits, the authors are not liable for any cost, charge or fee from Cloudflare, Google or another provider.</p>`,
 )}`,
+    { app },
+  );
+}
+
+export function releaseNotesPage(app: string) {
+  const a = esc(app);
+  const day = (date: string) =>
+    new Date(`${date}T00:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+  return page(
+    "Release notes",
+    `<h1>Release notes</h1>
+<p class="lede">The changes to ${a} that you need to know about, newest first. When a change adds tools, Claude gets the new tools only after you reconnect ${a}. In Claude, open <b>Customize → Connectors</b>, disconnect ${a}, and then connect it again.</p>
+${RELEASE_NOTES.map((d) =>
+  section(esc(day(d.date)), `<ul>${d.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>`),
+).join("\n")}`,
     { app },
   );
 }

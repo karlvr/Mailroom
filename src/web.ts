@@ -44,6 +44,7 @@ import {
   dashboardPage,
   favicon,
   landingPage,
+  releaseNotesPage,
   messageCodes,
   messagePage,
   privacyPage,
@@ -145,6 +146,7 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
     if (path === "/privacy" && method === "GET") return privacyPage(app, origin);
     if (path === "/terms" && method === "GET") return termsPage(app, origin);
     if (path === "/costs" && method === "GET") return costsPage(app);
+    if (path === "/release-notes" && method === "GET") return releaseNotesPage(app);
     if (path === "/setup" && method === "GET") return setupGet(req, env, origin, app);
     if (path === "/setup/login" && method === "POST") return setupLogin(req, env, origin, app);
     if (path === "/setup" && method === "POST") return setupSave(req, env, origin, app);
