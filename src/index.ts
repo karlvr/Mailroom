@@ -5,7 +5,8 @@ import { handleWeb } from "./web";
 
 const apiHandler = {
   fetch(req: Request, env: Env, ctx: ExecutionContext) {
-    return handleMcp(req, env, (ctx as ExecutionContext & { props: Props }).props);
+    const c = ctx as ExecutionContext & { props: Props; auth?: { clientId?: string } };
+    return handleMcp(req, env, { props: c.props, clientId: c.auth?.clientId ?? null });
   },
 };
 

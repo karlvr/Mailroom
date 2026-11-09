@@ -3,6 +3,9 @@ import { appName, type Env } from "./env";
 import { randomToken, safeEqual, sha256 } from "./crypto";
 import {
   type AccountPermissions,
+  contextHistory,
+  contextSummaries,
+  decideProposal,
   deleteAccount,
   getAllowlist,
   getConfig,
@@ -13,6 +16,7 @@ import {
   saveGoogleConfig,
   saveLinkedAccount,
   setConfig,
+  restoreContextVersion,
   updateAccountDetails,
   upsertUser,
 } from "./db";
@@ -21,6 +25,7 @@ import {
   PERMISSION_FIELDS,
   adminLoginPage,
   consentPage,
+  contextPage,
   dashboardPage,
   favicon,
   landingPage,
@@ -129,6 +134,12 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
     if (path === "/authorize") return authorize(req, env, app);
     const m = path.match(/^\/accounts\/([\w-]+)(\/remove)?$/);
     if (m && method === "POST") return accountPost(req, env, ctx, m[1], !!m[2]);
+    const history = path.match(/^\/accounts\/([\w-]+)\/context$/);
+    if (history && method === "GET") return contextGet(req, env, app, history[1]);
+    const proposal = path.match(/^\/accounts\/([\w-]+)\/context\/proposals\/(\d+)$/);
+    if (proposal && method === "POST") return proposalPost(req, env, app, proposal[1], Number(proposal[2]));
+    const restore = path.match(/^\/accounts\/([\w-]+)\/context\/versions\/(\d+)\/restore$/);
+    if (restore && method === "POST") return restorePost(req, env, app, restore[1], Number(restore[2]));
     return messagePage(app, "Not found", "This page does not exist.", { href: "/", text: "Home page" });
   } catch (e) {
     if (e instanceof AuthorizationError && e.redirectTo) return redirect(e.redirectTo);
@@ -148,7 +159,8 @@ async function home(req: Request, env: Env, origin: string, app: string) {
   if (!cfg || !session) return landingPage(app, origin, !!cfg);
   const flash = new URL(req.url).searchParams.get("msg") ?? undefined;
   const accounts = await listAccounts(env, session.userId);
-  return dashboardPage(app, origin, session.email, accounts, session.csrf, flash);
+  const history = await contextSummaries(env, session.userId);
+  return dashboardPage(app, origin, session.email, accounts, history, session.csrf, flash);
 }
 
 async function setupGet(req: Request, env: Env, origin: string, app: string, extra: { saved?: boolean; error?: string } = {}) {
@@ -341,8 +353,58 @@ async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: st
       sendInvitations: selected("sendInvitations"),
       replyToInvitations: selected("replyToInvitations"),
     },
-  });
+  }, session.email);
   return redirect(`/?msg=${encodeURIComponent(`${appName(env)} saved your changes.`)}`);
+}
+
+// ---------- context history ----------
+
+const historyUrl = (accountId: string, msg?: string) =>
+  `/accounts/${encodeURIComponent(accountId)}/context${msg ? `?msg=${encodeURIComponent(msg)}` : ""}`;
+
+async function contextGet(req: Request, env: Env, app: string, id: string) {
+  const session = await getUserSession(env, req);
+  const url = new URL(req.url);
+  if (!session) return redirect(`/login?next=${encodeURIComponent(url.pathname + url.search)}`);
+  const account = (await listAccounts(env, session.userId)).find((a) => a.id === id);
+  if (!account) return messagePage(app, "Not found", "This mailbox does not exist, or it is not yours.", { href: "/", text: "Home page" });
+  const { versions, proposals } = await contextHistory(env, session.userId, id);
+  const compare = url.searchParams.get("compare");
+  return contextPage(app, session.email, account, {
+    versions,
+    proposals,
+    selectedId: Number(url.searchParams.get("v")) || undefined,
+    compare: compare === "text" || compare === "next" || compare === "current" ? compare : "previous",
+    csrf: session.csrf,
+    flash: url.searchParams.get("msg") ?? undefined,
+  });
+}
+
+async function proposalPost(req: Request, env: Env, app: string, id: string, proposalId: number) {
+  const session = await getUserSession(env, req);
+  if (!session) return redirect("/");
+  const f = await form(req);
+  if (!checkCsrf(f, session.csrf)) return redirect(historyUrl(id, "That form expired. Try again."));
+  const accept = f.get("decision") === "accept";
+  const done = await decideProposal(env, session.userId, id, proposalId, { accept, editor: session.email });
+  if (!done) return redirect(historyUrl(id, "That proposal does not exist, or it already has a decision."));
+  return redirect(
+    historyUrl(id, accept ? `${app} accepted the proposal. It is now the current context.` : `${app} rejected and deleted the proposal.`),
+  );
+}
+
+async function restorePost(req: Request, env: Env, app: string, id: string, versionId: number) {
+  const session = await getUserSession(env, req);
+  if (!session) return redirect("/");
+  const f = await form(req);
+  if (!checkCsrf(f, session.csrf)) return redirect(historyUrl(id, "That form expired. Try again."));
+  const result = await restoreContextVersion(env, session.userId, id, versionId, session.email);
+  const messages = {
+    restored: `${app} restored the version. It is now the current context.`,
+    unchanged: "That version has the same text as the current context. The context did not change.",
+    not_found: "That version does not exist.",
+  };
+  return redirect(historyUrl(id, messages[result]));
 }
 
 // ---------- OAuth for Claude (MCP clients) ----------

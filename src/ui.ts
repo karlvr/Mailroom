@@ -1,4 +1,13 @@
-import { type Account, type AccountPermissions, PERMISSION_LABELS, accountPermissions, grantedScopes } from "./db";
+import {
+  type Account,
+  type AccountPermissions,
+  type ContextSummary,
+  type ContextVersion,
+  PERMISSION_LABELS,
+  accountPermissions,
+  grantedScopes,
+} from "./db";
+import { diffWords } from "./diff";
 import { hasCalendar } from "./google";
 
 export const esc = (v: unknown) =>
@@ -30,8 +39,8 @@ const grid = (cell: number, position: string) =>
 
 const CSS = `
 ${FONT_FACES}
-:root{color-scheme:light dark;--bg:#fff;--panel:#fff;--sunken:#f6f8f9;--ink:#0b1419;--muted:#55606a;--line:#e3e7ea;--strong:#c7ced4;--grid:rgba(11,20,25,.05);--envelope:rgba(11,20,25,.1);--tick:#9aa5ae;--field:#fff;--code:#f0f3f5;--accent:#0b7a55;--accent-soft:#e8f5ef;--accent-line:#b7dfcb;--accent-ink:#fff;--tile-line:#0b1419;--warn:#8a5300;--warn-bg:#fff7ea;--warn-line:#f0d6a8;--bad:#b42318;--bad-line:#f1b8b2;--btn:#0b1419;--btn-ink:#fff;--head:rgba(255,255,255,.88);--shadow:0 1px 2px rgba(11,20,25,.04),0 16px 40px -24px rgba(11,20,25,.2);--sans:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
-@media (prefers-color-scheme:dark){:root{--bg:#070b0d;--panel:#0d1316;--sunken:#0a0f12;--ink:#e3e9ec;--muted:#8e9aa3;--line:#1b2429;--strong:#2a353b;--grid:rgba(140,170,160,.06);--envelope:rgba(140,170,160,.14);--tick:#3a474e;--field:#070b0d;--code:#152025;--accent:#3ddc97;--accent-soft:rgba(61,220,151,.1);--accent-line:rgba(61,220,151,.3);--accent-ink:#04140d;--tile-line:#2a353b;--warn:#f2b65c;--warn-bg:#1f170a;--warn-line:#4a3712;--bad:#ff8a7a;--bad-line:#5a2620;--btn:#e3e9ec;--btn-ink:#070b0d;--head:rgba(7,11,13,.88);--shadow:0 24px 48px -24px rgba(0,0,0,.7)}}
+:root{color-scheme:light dark;--bg:#fff;--panel:#fff;--sunken:#f6f8f9;--ink:#0b1419;--muted:#55606a;--line:#e3e7ea;--strong:#c7ced4;--grid:rgba(11,20,25,.05);--envelope:rgba(11,20,25,.1);--tick:#9aa5ae;--field:#fff;--code:#f0f3f5;--accent:#0b7a55;--accent-soft:#e8f5ef;--accent-line:#b7dfcb;--accent-ink:#fff;--tile-line:#0b1419;--warn:#8a5300;--warn-bg:#fff7ea;--warn-line:#f0d6a8;--bad:#b42318;--bad-line:#f1b8b2;--bad-soft:#fdeceb;--btn:#0b1419;--btn-ink:#fff;--head:rgba(255,255,255,.88);--shadow:0 1px 2px rgba(11,20,25,.04),0 16px 40px -24px rgba(11,20,25,.2);--sans:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#070b0d;--panel:#0d1316;--sunken:#0a0f12;--ink:#e3e9ec;--muted:#8e9aa3;--line:#1b2429;--strong:#2a353b;--grid:rgba(140,170,160,.06);--envelope:rgba(140,170,160,.14);--tick:#3a474e;--field:#070b0d;--code:#152025;--accent:#3ddc97;--accent-soft:rgba(61,220,151,.1);--accent-line:rgba(61,220,151,.3);--accent-ink:#04140d;--tile-line:#2a353b;--warn:#f2b65c;--warn-bg:#1f170a;--warn-line:#4a3712;--bad:#ff8a7a;--bad-line:#5a2620;--bad-soft:rgba(255,138,122,.12);--btn:#e3e9ec;--btn-ink:#070b0d;--head:rgba(7,11,13,.88);--shadow:0 24px 48px -24px rgba(0,0,0,.7)}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 var(--sans)}
 .frame{position:relative;min-height:100vh;display:flex;flex-direction:column;overflow:hidden}
@@ -251,7 +260,33 @@ input[type=checkbox]{flex:none;width:18px;height:18px;margin:0;accent-color:var(
 .doc{margin-top:16px}
 .lede+.panel{margin-top:28px}
 .doc h2{margin-bottom:10px}
+.ctx-meta{margin:8px 0 0;font:12.5px var(--mono);color:var(--muted)}
+.ctx-meta b{font-weight:500;color:var(--ink)}
+.diff{margin:0;padding:16px 20px;border-top:1px solid var(--line);background:var(--field);font:14px/1.65 var(--sans);white-space:pre-wrap;overflow-wrap:anywhere}
+.diff del{color:var(--bad);background:var(--bad-soft);text-decoration:line-through}
+.diff ins{color:var(--accent);background:var(--accent-soft);text-decoration:none}
+.diff .empty-text{color:var(--muted);font-style:italic}
+.cap{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px 16px;padding:10px 20px;border-top:1px solid var(--line)}
+.seg{display:inline-flex;flex-wrap:wrap;border:1px solid var(--strong)}
+.seg>*{padding:6px 12px;font:500 12px var(--mono);color:var(--muted);text-decoration:none}
+.seg>*+*{border-left:1px solid var(--strong)}
+.seg a:hover{color:var(--ink)}
+.seg [aria-current]{background:var(--btn);color:var(--btn-ink)}
+.seg span{opacity:.45}
+.history{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);gap:24px;align-items:start}
+@media (max-width:840px){.history{grid-template-columns:minmax(0,1fr)}}
+.vlist{margin:0;padding:0;list-style:none}
+.vlist li+li{border-top:1px solid var(--line)}
+.vlist a{display:flex;flex-direction:column;gap:2px;padding:12px 16px;color:var(--ink);text-decoration:none;font-size:14px}
+.vlist a:hover{background:var(--sunken)}
+.vlist a[aria-current]{background:var(--accent-soft);box-shadow:inset 3px 0 0 var(--accent)}
+.vlist .n{display:flex;gap:8px;align-items:center;font:500 12px var(--mono);color:var(--accent)}
+.vlist .m{font:12px var(--mono);color:var(--muted)}
+.proposal+.proposal{margin-top:24px}
+.proposal .actions{justify-content:flex-start}
 `;
+
+const TIME_JS = `document.querySelectorAll('time[datetime]').forEach(t=>{t.textContent=new Date(t.dateTime).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'})})`;
 
 const COPY_JS = `document.addEventListener('click',e=>{const b=e.target.closest('[data-copy]');if(!b)return;navigator.clipboard.writeText(b.getAttribute('data-copy')).then(()=>{const t=b.textContent;b.textContent='Copied';setTimeout(()=>b.textContent=t,1200)})})`;
 
@@ -361,7 +396,7 @@ export function page(title: string, body: string, opts: PageOptions): Response {
 ${body}
 </main>
 <footer class="foot"><div><span>${app} is a self-hosted mailbox and calendar connector for Claude. Claude can send email and calendar invitations only from an account where you allow it.</span><span><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></span></div></footer>
-</div><script>${COPY_JS}</script></body></html>`;
+</div><script>${COPY_JS};${TIME_JS}</script></body></html>`;
   return new Response(html, {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
@@ -606,6 +641,7 @@ ${section(
   `Data that ${a} stores`,
   `<ul><li>Your Google account ID, your email address, and the times of your first and last sign-in.</li>
 <li>For each mailbox that you link: its address, its short name, its context notes, the settings <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.replyToInvitations)}</b>, the Google permissions that you granted, and a Google refresh token. ${a} encrypts the token before it stores it.</li>
+<li>For each mailbox: each version of its context notes that you saved or accepted, when the version became current, and who made it. For a change that an agent proposed, ${a} also stores the name of the app, and the name and the reason that the agent gave. ${a} deletes a proposal when you reject it.</li>
 <li>Your web session, and a record of each Claude connection that you approve.</li></ul>
 <p>${a} does not store the content of your email or your calendar events.</p>`,
 )}
@@ -626,7 +662,7 @@ ${section(
 )}
 ${section(
   "Remove your data",
-  `<ul><li>To unlink a mailbox, click <b>Remove</b> on the ${a} home page. ${a} deletes the stored token and revokes the Google access of that mailbox.</li>
+  `<ul><li>To unlink a mailbox, click <b>Remove</b> on the ${a} home page. ${a} deletes the stored token and the context history, and revokes the Google access of that mailbox.</li>
 <li>To stop the access of Claude, remove the ${a} connector in Claude.</li>
 <li>You can also revoke the access of ${a} on the <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">third-party connections</a> page of your Google account.</li>
 <li>To delete all your data, contact the operator of ${a}.</li></ul>`,
@@ -673,18 +709,62 @@ export const PERMISSION_FIELDS: Record<keyof AccountPermissions, string> = {
   replyToInvitations: "allow_reply",
 };
 
+const historyHref = (accountId: string) => `/accounts/${encodeURIComponent(accountId)}/context`;
+
+/** Returns a time as a `<time>` element. The page script shows it in the time zone of the browser. */
+const when = (ms: number) =>
+  `<time datetime="${new Date(ms).toISOString()}">${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC</time>`;
+
+/** Returns the name of the person or the agent that wrote a version, as HTML. `viewer` is the address of the signed-in user. */
+function authorHtml(v: ContextVersion, viewer: string): string {
+  if (v.author_kind === "user") return v.author.toLowerCase() === viewer.toLowerCase() ? "you" : esc(v.author);
+  const host = clientHost(v.client_id);
+  return `<b>${esc(v.author)}</b>${host ? ` <span class="muted">(${esc(host)})</span>` : ""}${
+    v.agent_label ? ` · “${esc(v.agent_label)}”` : ""
+  }`;
+}
+
+/** Returns the host of an OAuth client ID that is a URL, which the OAuth provider verified. Returns null for other client IDs. */
+function clientHost(clientId: string | null): string | null {
+  if (!clientId?.startsWith("https://")) return null;
+  try {
+    return new URL(clientId).host;
+  } catch {
+    return null;
+  }
+}
+
+/** Returns who made a version current and when, as HTML, for example "Proposed by Claude, accepted by you on 10 Nov 2026". */
+function changeHtml(v: ContextVersion, viewer: string, restoredNumber?: number): string {
+  const at = when(v.decided_at ?? v.created_at);
+  const decider = v.decided_by && v.decided_by.toLowerCase() === viewer.toLowerCase() ? "you" : esc(v.decided_by ?? "");
+  if (v.author_kind === "agent") return `Proposed by ${authorHtml(v, viewer)}, accepted by ${decider} on ${at}`;
+  if (v.restored_from) return `Restored ${restoredNumber ? `from version ${restoredNumber} ` : ""}by ${authorHtml(v, viewer)} on ${at}`;
+  return `Changed by ${authorHtml(v, viewer)} on ${at}`;
+}
+
+/** Returns the line under the context of a mailbox: when the context changed, by whom, and a link to its history. */
+function contextMeta(m: Account, summary: ContextSummary | undefined, viewer: string): string {
+  if (!summary?.latest) return "";
+  const versions = `${summary.versions} ${summary.versions === 1 ? "version" : "versions"}`;
+  return `<p class="ctx-meta">${changeHtml(summary.latest, viewer)} · <a href="${historyHref(m.id)}">History (${versions})</a></p>`;
+}
+
 export function dashboardPage(
   app: string,
   origin: string,
   who: string,
   accounts: Account[],
+  history: Map<string, ContextSummary>,
   csrf: string,
   flash?: string,
 ) {
   const a = esc(app);
   const mcpUrl = `${origin}/mcp`;
+  const proposals = (m: Account) => history.get(m.id)?.proposals ?? 0;
   // Open a mailbox when it needs attention, or when it is the only one.
-  const opened = (m: Account) => accounts.length === 1 || m.status !== "ok" || !m.name || !m.context;
+  const opened = (m: Account) =>
+    accounts.length === 1 || m.status !== "ok" || !m.name || !m.context || proposals(m) > 0;
   const can = (text: string) => `<div class="r"><span>${text}</span><span class="v">${ICON.check}Allowed</span></div>`;
   /** The short text of the pill that shows that a permission is on. */
   const permissionPills: Record<keyof AccountPermissions, string> = {
@@ -717,10 +797,17 @@ export function dashboardPage(
 <span class="who"><b>${esc(m.name || m.email)}</b>${m.name ? `<span>${esc(m.email)}</span>` : ""}</span>
 <span class="pills">${m.status === "ok" ? `<span class="pill ok">Linked</span>` : `<span class="pill warn">${ICON.warn}Needs re-linking</span>`}${
       calendar ? `<span class="pill ok">Calendar</span>` : `<span class="pill">No calendar</span>`
-    }${onPills || `<span class="pill">Sending off</span>`}</span>
+    }${onPills || `<span class="pill">Sending off</span>`}${
+      proposals(m) ? `<span class="pill warn">${proposals(m)} context ${proposals(m) === 1 ? "proposal" : "proposals"}</span>` : ""
+    }</span>
 <span class="chev">${ICON.chevron}</span></summary>
 <div class="body">
 ${m.status !== "ok" ? warning(`${esc(m.status_detail || "Google access stopped working.")} <a href="${relink}">Re-link</a>`) : ""}
+${
+  proposals(m)
+    ? `<div class="notice info"><span>An agent proposed a change to the context. The context changes only when you accept it. <a href="${historyHref(m.id)}#proposals">Review the ${proposals(m) === 1 ? "proposal" : "proposals"}</a></span></div>`
+    : ""
+}
 <form method="post" action="/accounts/${id}">
 <input type="hidden" name="csrf" value="${esc(csrf)}">
 <div class="cols"><div>
@@ -728,6 +815,7 @@ ${m.status !== "ok" ? warning(`${esc(m.status_detail || "Google access stopped w
 <input id="name-${id}" type="text" name="name" value="${esc(m.name)}" placeholder="For example, Support">
 <label for="context-${id}">Context for Claude</label>
 <textarea id="context-${id}" name="context" placeholder="What this mailbox is for, who matters, what's urgent, what to ignore, how to sign replies…">${esc(m.context)}</textarea>
+${contextMeta(m, history.get(m.id), who)}
 </div>
 <div class="caps"><div class="label">What Claude can do here</div>
 ${can("Search and read email")}${can("Add and remove labels")}${can("Save drafts and forwards")}${can("Move threads to the trash")}
@@ -776,7 +864,7 @@ ${
 <div class="label">Team and Enterprise plans</div>
 <p>On a Team or Enterprise plan, an Owner adds the connector once in <b>Organization settings → Connectors</b>, with <b>Add → Custom → Web</b>. Then each person opens <b>Customize → Connectors</b> and clicks <b>Connect</b> next to ${a}.</p>
 <div class="label">Tools</div>
-<p>Claude then has tools for every mailbox above. With these tools, Claude can list your mailboxes, search, read threads, apply labels, create drafts and forwards, and trash threads. Claude can also read calendars, find free time, and create, change and delete events. Claude can send drafts, send invitations and reply to invitations only where you allow it.</p>
+<p>Claude then has tools for every mailbox above. With these tools, Claude can list your mailboxes, search, read threads, apply labels, create drafts and forwards, and trash threads. Claude can also read calendars, find free time, and create, change and delete events. Claude can propose changes to the context of a mailbox, and you accept or reject each proposal. Claude can send drafts, send invitations and reply to invitations only where you allow it.</p>
 </div></div>
 </section>`,
     {
@@ -832,7 +920,7 @@ ${d.redirectIsLoopback ? warning("That address is on your computer. Continue onl
 <span>${ICON.check}Search and read email</span><span>${ICON.check}Label email</span><span>${ICON.check}Save drafts and forwards</span><span>${ICON.check}Move email to the trash</span>
 <span>${ICON.check}Read calendars and find free time</span><span>${ICON.check}Create, change and delete events without guests</span>
 <span>${ICON.send}Send email from a mailbox with the mark Can send</span><span>${ICON.send}Send calendar invitations from a mailbox with the mark Can invite</span>
-<span>${ICON.send}Reply to invitations for a mailbox with the mark Can reply</span><span class="no">${ICON.cross}Not delete email permanently</span>
+<span>${ICON.send}Reply to invitations for a mailbox with the mark Can reply</span><span>${ICON.check}Propose changes to the context, which you accept or reject</span><span class="no">${ICON.cross}Not delete email permanently</span>
 </div></div>
 <form method="post" action="/authorize" class="grp decide">
 <input type="hidden" name="handle" value="${esc(handle)}">
@@ -840,5 +928,127 @@ ${d.redirectIsLoopback ? warning("That address is on your computer. Continue onl
 <div class="row"><button name="decision" value="approve">Allow</button><button class="secondary" name="decision" value="deny">Deny</button></div>
 </form></div>`,
     { app, width: "narrow", backdrop: "letter", aside: signedIn(who) },
+  );
+}
+
+/** How the history page shows the selected version: its text, or its changes against another version. */
+export type ContextCompare = "text" | "previous" | "next" | "current";
+
+/** The data of the context history page of one mailbox. */
+export interface ContextPageData {
+  /** The accepted versions, oldest first. */
+  versions: ContextVersion[];
+  /** The proposals that wait for a decision, oldest first. */
+  proposals: ContextVersion[];
+  /** The version to show. The default is the current version. */
+  selectedId?: number;
+  compare: ContextCompare;
+  csrf: string;
+  flash?: string;
+}
+
+export function contextPage(app: string, who: string, account: Account, h: ContextPageData) {
+  const a = esc(app);
+  const base = historyHref(account.id);
+  const { versions } = h;
+  const current = versions[versions.length - 1] as ContextVersion | undefined;
+  const position = new Map(versions.map((v, i) => [v.id, i]));
+  const number = (id: number) => (position.get(id) ?? -1) + 1;
+  const csrf = `<input type="hidden" name="csrf" value="${esc(h.csrf)}">`;
+
+  const textHtml = (t: string) => (t ? esc(t) : `<span class="empty-text">The context is empty.</span>`);
+  const diffHtml = (before: string, after: string) =>
+    diffWords(before, after)
+      .map((r) => (r.op === "same" ? esc(r.text) : r.op === "removed" ? `<del>${esc(r.text)}</del>` : `<ins>${esc(r.text)}</ins>`))
+      .join("");
+  const reasonHtml = (v: ContextVersion) => (v.reason ? `<p class="note"><b>Reason that the agent gave:</b> ${esc(v.reason)}</p>` : "");
+
+  const proposalHtml = (p: ContextVersion) => {
+    const stale = (current?.id ?? null) !== p.base_id;
+    return `<div class="panel raised ticks accent proposal">
+<div class="pad"><div class="label hot">Proposal</div>
+<p>${authorHtml(p, who)} proposed this change on ${when(p.created_at)}.</p>
+${reasonHtml(p)}
+${stale ? warning("The context changed after the agent made this proposal. The changes below compare the proposal with the current context. If you accept the proposal, it replaces the current context.") : ""}
+</div>
+<div class="cap"><span class="label">Changes from the current context</span></div>
+<div class="diff">${current?.context === p.context ? textHtml(p.context) : diffHtml(current?.context ?? "", p.context)}</div>
+<form method="post" action="${base}/proposals/${p.id}" class="actions">${csrf}<div class="row"><button name="decision" value="accept">Accept</button><button class="secondary" name="decision" value="reject">Reject</button></div></form>
+</div>`;
+  };
+
+  const selected = versions.find((v) => v.id === h.selectedId) ?? current;
+  let versionsHtml = `<div class="panel pad"><p>This mailbox has no context yet. You can enter it on the <a href="/">Mailboxes</a> page.</p></div>`;
+  if (selected && current) {
+    const i = position.get(selected.id)!;
+    const previous = versions[i - 1];
+    const next = versions[i + 1];
+    const isCurrent = selected.id === current.id;
+    const n = i + 1;
+    const modes: { key: ContextCompare; label: string; available: boolean }[] = [
+      { key: "text", label: "Text", available: true },
+      { key: "previous", label: "Previous", available: !!previous },
+      { key: "next", label: "Next", available: !!next },
+      { key: "current", label: "Current", available: !isCurrent },
+    ];
+    const mode = modes.find((m) => m.key === h.compare && m.available)?.key ?? "text";
+    const seg = modes
+      .map((m) =>
+        m.available
+          ? `<a href="${base}?v=${selected.id}&amp;compare=${m.key}#versions"${m.key === mode ? ` aria-current="true"` : ""}>${m.label}</a>`
+          : `<span>${m.label}</span>`,
+      )
+      .join("");
+    const [caption, before, after] =
+      mode === "previous"
+        ? [`Changes from version ${n - 1} to version ${n}`, previous.context, selected.context]
+        : mode === "next"
+          ? [`Changes from version ${n} to version ${n + 1}`, selected.context, next.context]
+          : mode === "current"
+            ? [`Changes from version ${n} to the current version, version ${versions.length}`, selected.context, current.context]
+            : [`Text of version ${n}`, selected.context, selected.context];
+    const body = before === after ? textHtml(selected.context) : diffHtml(before, after);
+    const same = mode !== "text" && before === after ? ". The texts are the same." : "";
+    const list = [...versions]
+      .reverse()
+      .map(
+        (v) =>
+          `<li><a href="${base}?v=${v.id}#versions"${v.id === selected.id ? ` aria-current="page"` : ""}><span class="n">Version ${number(v.id)}${
+            v.id === current.id ? ` <span class="pill ok">Current</span>` : ""
+          }</span><span class="m">${changeHtml(v, who, v.restored_from ? number(v.restored_from) || undefined : undefined)}</span></a></li>`,
+      )
+      .join("");
+    versionsHtml = `<div class="history"><div class="panel"><ul class="vlist">${list}</ul></div>
+<div class="panel">
+<div class="pad"><div class="label hot">Version ${n}${isCurrent ? " · Current" : ""}</div>
+<p>${changeHtml(selected, who, selected.restored_from ? number(selected.restored_from) || undefined : undefined)}.</p>
+${selected.author_kind === "agent" ? reasonHtml(selected) : ""}</div>
+<div class="cap"><span class="label">${caption}${same}</span><span class="seg" aria-label="Compare">${seg}</span></div>
+<div class="diff">${body}</div>
+${
+  isCurrent
+    ? ""
+    : `<form method="post" action="${base}/versions/${selected.id}/restore" class="actions">${csrf}<div class="row"><button class="secondary">Restore version ${n}</button></div><span class="help">The text of version ${n} becomes the current context, as a new version.</span></form>`
+}
+</div></div>`;
+  }
+
+  return page(
+    "Context history",
+    `${h.flash ? `<div class="notice info">${esc(h.flash)}</div>` : ""}
+<div class="rule"><span class="n">Context</span><span>${esc(account.name || account.email)}</span><span class="end">${versions.length} ${versions.length === 1 ? "version" : "versions"}</span></div>
+<div class="title"><div><h1>Context history</h1>
+<p class="lede">${a} instructs Claude to read the current context of <b>${esc(account.email)}</b> before it works in this mailbox. An agent can only propose a change. The context changes only when you accept the proposal. The name of the app comes from the Claude connection that you approved. The agent gives its own name, in quotes, and its reason. ${a} cannot verify them.</p></div>
+<a class="btn secondary" href="/">Back to mailboxes</a></div>
+${
+  h.proposals.length
+    ? `<section class="sect" id="proposals"><div class="rule"><span class="n">01</span><span>Proposals</span><span class="end">${h.proposals.length} waiting</span></div>
+${h.proposals.map(proposalHtml).join("\n")}</section>`
+    : ""
+}
+<section class="sect" id="versions"><div class="rule"><span class="n">${h.proposals.length ? "02" : "01"}</span><span>Versions</span><span class="end">Newest first</span></div>
+${versionsHtml}
+</section>`,
+    { app, width: "wide", nav: [{ href: "/", text: "Mailboxes" }], aside: signedIn(who) },
   );
 }

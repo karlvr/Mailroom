@@ -92,6 +92,7 @@ Claude then has these tools:
 | Tool | What it does |
 | --- | --- |
 | `list_accounts` | Lists the mailboxes, with the name, the context notes and the settings of each mailbox |
+| `propose_context` | Proposes new context notes for a mailbox. The context changes only when you accept the proposal on the Mailroom web page. |
 | `search_threads` | Searches one mailbox with Gmail search syntax |
 | `get_thread` | Reads a whole thread as plain text |
 | `list_labels` | Lists the labels of one mailbox |
@@ -132,6 +133,19 @@ These instructions reduce the risk of prompt injection, but they cannot remove i
 - **Allow replies to invitations** for `respond_to_event`
 
 Select a setting only for a mailbox where you accept this risk. Claude can always change or delete an event that has no other guests. If Claude trashes a thread by mistake, you can restore it from the Gmail trash for 30 days.
+
+## Context history and proposals
+
+Mailroom instructs Claude to follow the context notes of a mailbox as your instructions. For this reason, Claude cannot change the context. Claude can only propose a change with `propose_context`, for example when you tell a scheduled task to keep the context up to date. The context changes only when you accept the proposal.
+
+When a mailbox has a proposal, the mailboxes page shows a notice for that mailbox. On the **History** page of the mailbox, you can do these actions:
+
+- See each proposal and its changes from the current context. Then accept or reject it. Mailroom deletes a rejected proposal.
+- See each earlier version of the context, with the time and the person or the agent that made it. For a version from an agent, the history also shows the person who accepted it.
+- Compare a version with the previous version, the next version or the current version.
+- Restore an earlier version. The restored text becomes a new version, so the history keeps every step.
+
+For a change from an agent, Mailroom records the name of the app from the Claude connection that you approved. The agent also gives its own name, for example the name of the scheduled task, and a reason. Mailroom cannot verify the name and the reason that the agent gives. A mailbox can have at most 10 proposals that wait for a decision.
 
 ## Access control
 
