@@ -952,8 +952,8 @@ export function dashboardPage(
   const a = esc(app);
   const mcpUrl = `${origin}/mcp`;
   const hasProposal = (m: Account) => history.get(m.id)?.hasProposal ?? false;
-  // Each mailbox starts collapsed, unless it is the only one.
-  const opened = accounts.length === 1;
+  // Each mailbox starts collapsed, unless it is the only one or it still needs a name or context notes.
+  const opened = (m: Account) => accounts.length === 1 || !m.name || !m.context;
   const can = (text: string) => `<div class="r"><span>${text}</span><span class="v">${ICON.check}Allowed</span></div>`;
   /** The short text of the pill that shows that a permission is on. */
   const permissionPills: Record<keyof AccountPermissions, string> = {
@@ -981,7 +981,7 @@ export function dashboardPage(
       return `<label class="toggle" for="${field}-${id}">${esc(PERMISSION_LABELS[k])}<input id="${field}-${id}" type="checkbox" name="${field}" value="1"${permissions[k] ? " checked" : ""}></label>
 <p class="help">${permissionHelp[k]}</p>`;
     };
-    return `<details class="mbx"${opened ? " open" : ""}>
+    return `<details class="mbx"${opened(m) ? " open" : ""}>
 <summary><span class="id${m.status === "ok" ? "" : " warn"}">${mailboxId(i + 1)}</span>
 <span class="who"><b>${esc(m.name || m.email)}</b>${m.name ? `<span>${esc(m.email)}</span>` : ""}</span>
 <span class="pills">${m.status === "ok" ? `<span class="pill ok">Linked</span>` : `<span class="pill warn">${ICON.warn}Needs re-linking</span>`}${
