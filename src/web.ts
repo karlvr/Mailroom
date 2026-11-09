@@ -2,6 +2,7 @@ import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-pr
 import { appName, type Env } from "./env";
 import { randomToken, safeEqual, sha256 } from "./crypto";
 import {
+  type AccountPermissions,
   deleteAccount,
   getAllowlist,
   getConfig,
@@ -15,8 +16,9 @@ import {
   updateAccountDetails,
   upsertUser,
 } from "./db";
-import { GMAIL_SCOPE, authorizeUrl, exchangeCode, pkcePair, revokeToken } from "./google";
+import { GMAIL_SCOPE, authorizeUrl, exchangeCode, hasCalendar, pkcePair, revokeToken } from "./google";
 import {
+  PERMISSION_FIELDS,
   adminLoginPage,
   consentPage,
   dashboardPage,
@@ -300,9 +302,16 @@ async function googleCallback(req: Request, env: Env, origin: string, app: strin
       text: "Link again",
     });
   }
-  await saveLinkedAccount(env, session.userId, result.email, result.refreshToken);
+  await saveLinkedAccount(env, session.userId, {
+    email: result.email,
+    refreshToken: result.refreshToken,
+    scopes: result.scopes,
+  });
+  const calendarNote = hasCalendar(result.scopes)
+    ? ""
+    : ` ${app} did not get the Calendar permissions, so Claude cannot use the calendar of this account. To add the calendar, click Re-link and keep the Calendar check boxes selected.`;
   return redirect(
-    `/?msg=${encodeURIComponent(`${app} linked ${result.email}. Give the mailbox a short name and context notes. ${app} instructs Claude to read them before it works in that mailbox.`)}`,
+    `/?msg=${encodeURIComponent(`${app} linked ${result.email}. Give the mailbox a short name and context notes. ${app} instructs Claude to read them before it works in that mailbox.${calendarNote}`)}`,
     [clear],
   );
 }
@@ -323,10 +332,15 @@ async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: st
     }
     return redirect("/");
   }
+  const selected = (k: keyof AccountPermissions) => f.get(PERMISSION_FIELDS[k]) === "1";
   await updateAccountDetails(env, session.userId, id, {
     name: String(f.get("name") ?? "").trim(),
     context: String(f.get("context") ?? "").trim(),
-    allowSend: f.get("allow_send") === "1",
+    permissions: {
+      sendEmail: selected("sendEmail"),
+      sendInvitations: selected("sendInvitations"),
+      replyToInvitations: selected("replyToInvitations"),
+    },
   });
   return redirect(`/?msg=${encodeURIComponent(`${appName(env)} saved your changes.`)}`);
 }

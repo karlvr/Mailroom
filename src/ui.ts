@@ -1,4 +1,5 @@
-import type { Account } from "./db";
+import { type Account, type AccountPermissions, PERMISSION_LABELS, accountPermissions, grantedScopes } from "./db";
+import { hasCalendar } from "./google";
 
 export const esc = (v: unknown) =>
   String(v ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -142,6 +143,7 @@ input[type=checkbox]{flex:none;width:18px;height:18px;margin:0;accent-color:var(
 .caps .no,.caps .no .v{color:var(--muted)}
 .caps .send{padding:12px 14px;border-top:1px solid var(--line);background:var(--panel)}
 .toggle{align-items:center;gap:12px;margin:0;font-size:14.5px;cursor:pointer}
+.caps .send .help+.toggle{margin-top:16px}
 .actions{display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;padding:14px 20px;border-top:1px solid var(--line);background:var(--sunken)}
 .actions .row{margin:0}
 .register>.note{border:0;border-top:1px solid var(--line);font:12px var(--mono)}
@@ -358,7 +360,7 @@ export function page(title: string, body: string, opts: PageOptions): Response {
 <main class="${opts.width ?? "text"}">
 ${body}
 </main>
-<footer class="foot"><div><span>${app} is a self-hosted mailbox connector for Claude. Claude can send email only from a mailbox where you select Allow sending.</span><span><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></span></div></footer>
+<footer class="foot"><div><span>${app} is a self-hosted mailbox and calendar connector for Claude. Claude can send email and calendar invitations only from an account where you allow it.</span><span><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></span></div></footer>
 </div><script>${COPY_JS}</script></body></html>`;
   return new Response(html, {
     headers: {
@@ -458,11 +460,14 @@ export function setupPage(
       body: `<p>${ext("https://console.cloud.google.com/projectcreate", "Create a project")}. You can use any name, for example <code>${a}</code>. Before you do the next steps, select the project in the project picker at the top of the page.</p>`,
     },
     {
-      short: "Gmail API",
-      title: "Enable the Gmail API",
+      short: "Google APIs",
+      title: "Enable the Gmail API and the Google Calendar API",
       where: "console.cloud.google.com",
       done: s.configured,
-      body: `<p>${ext("https://console.cloud.google.com/apis/library/gmail.googleapis.com", "Open the Gmail API")} and click <b>Enable</b>.</p>`,
+      body: subSteps([
+        `${ext("https://console.cloud.google.com/apis/library/gmail.googleapis.com", "Open the Gmail API")} and click <b>Enable</b>.`,
+        `${ext("https://console.cloud.google.com/apis/library/calendar-json.googleapis.com", "Open the Google Calendar API")} and click <b>Enable</b>.`,
+      ]),
     },
     {
       short: "Sign-in screen",
@@ -560,7 +565,7 @@ export function landingPage(app: string, origin: string, configured: boolean) {
 <div>
 <span class="chip"><b>MCP</b><i></i>Gmail and Google Workspace</span>
 <h1>All your mailboxes.<br>Each with its own context.</h1>
-<p class="lede">${a} is a self-hosted connector for Claude. Claude can search, read, label, draft and trash email in each Gmail and Workspace mailbox that you link.</p>
+<p class="lede">${a} is a self-hosted connector for Claude. Claude can search, read, label, draft and trash email in each Gmail and Workspace mailbox that you link. Claude can also read its calendar, find free time and schedule events.</p>
 ${
   configured
     ? `<div class="row"><a class="btn big" href="/login">Sign in with Google${ICON.arrow}</a><a class="btn big secondary" href="/setup">Admin setup</a></div>
@@ -584,8 +589,8 @@ ${
 <div class="facts">
 ${fact(1, "Hosting", `${a} runs on the Cloudflare account of the person or organisation that deployed it.`)}
 ${fact(2, "Credentials", `${a} encrypts the Google tokens that it stores.`)}
-${fact(3, "Sending", `Claude can send email only from a mailbox where you select <b>Allow sending</b>. Claude cannot delete email permanently.`)}
-${fact(4, "Email content", `${a} instructs Claude to treat email content as data, never as instructions.`)}
+${fact(3, "Sending", `Claude can send email, send calendar invitations and reply to invitations only from an account where you allow it. Claude cannot delete email permanently.`)}
+${fact(4, "Content", `${a} instructs Claude to treat email and calendar content as data, never as instructions.`)}
 </div>`,
     { app, width: "wide", backdrop: "envelope", aside: `<span class="live">${esc(new URL(origin).host)}</span>` },
   );
@@ -596,25 +601,26 @@ export function privacyPage(app: string, origin: string) {
   return page(
     "Privacy policy",
     `<h1>Privacy policy</h1>
-<p class="lede">This policy applies to ${a} at <b>${esc(new URL(origin).host)}</b>. ${a} connects Gmail and Google Workspace mailboxes to Claude. The person or organisation that deployed ${a} operates it. Cloudflare hosts it.</p>
+<p class="lede">This policy applies to ${a} at <b>${esc(new URL(origin).host)}</b>. ${a} connects Gmail and Google Workspace mailboxes and calendars to Claude. The person or organisation that deployed ${a} operates it. Cloudflare hosts it.</p>
 ${section(
   `Data that ${a} stores`,
   `<ul><li>Your Google account ID, your email address, and the times of your first and last sign-in.</li>
-<li>For each mailbox that you link: its address, its short name, its context notes, the <b>Allow sending</b> setting and a Google refresh token. ${a} encrypts the token before it stores it.</li>
+<li>For each mailbox that you link: its address, its short name, its context notes, the settings <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.replyToInvitations)}</b>, the Google permissions that you granted, and a Google refresh token. ${a} encrypts the token before it stores it.</li>
 <li>Your web session, and a record of each Claude connection that you approve.</li></ul>
-<p>${a} does not store the content of your email.</p>`,
+<p>${a} does not store the content of your email or your calendar events.</p>`,
 )}
 ${section(
   `How ${a} uses your Google data`,
-  `<p>${a} uses Google sign-in to get your verified email address. ${a} uses the Gmail API only when Claude calls one of the ${a} tools. ${a} then sends the result to Claude through the connection that you approved.</p>
-<p>The tools can search, read, label, draft and trash email. ${a} sends email only from a mailbox where you select <b>Allow sending</b>.</p>
+  `<p>${a} uses Google sign-in to get your verified email address. ${a} uses the Gmail API and the Google Calendar API only when Claude calls one of the ${a} tools. ${a} then sends the result to Claude through the connection that you approved.</p>
+<p>The tools can search, read, label, draft and trash email. ${a} sends email only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendEmail)}</b>.</p>
+<p>The tools can read calendars, find free time, and create, change and delete events. ${a} sends calendar invitations only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b>. ${a} replies to invitations only for a mailbox where you select <b>${esc(PERMISSION_LABELS.replyToInvitations)}</b>.</p>
 <p>${a} does not sell your data. ${a} does not use your data for advertising or to train AI models.</p>
 <p>The use and transfer of information that ${a} receives from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>`,
 )}
 ${section(
   "Who receives your data",
-  `<ul><li><b>Google</b> supplies the sign-in and the Gmail API. Your email stays in Gmail.</li>
-<li><b>Anthropic</b> receives the email data that ${a} sends to Claude. The <a href="https://www.anthropic.com/legal/privacy" target="_blank" rel="noopener">Anthropic privacy policy</a> and your Claude settings apply to that data.</li>
+  `<ul><li><b>Google</b> supplies the sign-in, the Gmail API and the Google Calendar API. Your email stays in Gmail, and your events stay in Google Calendar.</li>
+<li><b>Anthropic</b> receives the email and calendar data that ${a} sends to Claude. The <a href="https://www.anthropic.com/legal/privacy" target="_blank" rel="noopener">Anthropic privacy policy</a> and your Claude settings apply to that data.</li>
 <li><b>Cloudflare</b> runs ${a} and stores its data. Cloudflare can keep request logs.</li></ul>
 <p>${a} does not send your data to other parties.</p>`,
 )}
@@ -645,12 +651,12 @@ ${section(
 )}
 ${section(
   "Your instructions",
-  `<p>Claude uses ${a} when you instruct it. You are responsible for your instructions and for the actions that Claude does because of them. Select <b>Allow sending</b> only for a mailbox where you accept that Claude can send email.</p>
-<p>${a} instructs Claude to treat email content as data, never as instructions. This instruction reduces the risk that an email tricks Claude, but it cannot remove the risk.</p>`,
+  `<p>Claude uses ${a} when you instruct it. You are responsible for your instructions and for the actions that Claude does because of them. Select <b>${esc(PERMISSION_LABELS.sendEmail)}</b> only for a mailbox where you accept that Claude can send email. Select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.replyToInvitations)}</b> only for a mailbox where you accept that Claude can send calendar invitations and replies.</p>
+<p>${a} instructs Claude to treat email and calendar content as data, never as instructions. This instruction reduces the risk that an email or an event tricks Claude, but it cannot remove the risk.</p>`,
 )}
 ${section(
   "No warranty",
-  `<p>The operator supplies ${a} “as is”, without warranty of any kind. To the extent that the law permits, the operator is not liable for loss or damage from the use of ${a}. This includes email that Claude sends, labels or trashes.</p>`,
+  `<p>The operator supplies ${a} “as is”, without warranty of any kind. To the extent that the law permits, the operator is not liable for loss or damage from the use of ${a}. This includes email that Claude sends, labels or trashes, and calendar events that Claude creates, changes, deletes or replies to.</p>`,
 )}
 ${section(
   "Changes",
@@ -659,6 +665,13 @@ ${section(
     { app },
   );
 }
+
+/** The name of the check box for each permission in the form of a mailbox. The form sends the value "1" when the box is selected. */
+export const PERMISSION_FIELDS: Record<keyof AccountPermissions, string> = {
+  sendEmail: "allow_send",
+  sendInvitations: "allow_invite",
+  replyToInvitations: "allow_reply",
+};
 
 export function dashboardPage(
   app: string,
@@ -673,15 +686,38 @@ export function dashboardPage(
   // Open a mailbox when it needs attention, or when it is the only one.
   const opened = (m: Account) => accounts.length === 1 || m.status !== "ok" || !m.name || !m.context;
   const can = (text: string) => `<div class="r"><span>${text}</span><span class="v">${ICON.check}Allowed</span></div>`;
+  /** The short text of the pill that shows that a permission is on. */
+  const permissionPills: Record<keyof AccountPermissions, string> = {
+    sendEmail: "Sending on",
+    sendInvitations: "Invitations on",
+    replyToInvitations: "Replies on",
+  };
+  const permissionHelp: Record<keyof AccountPermissions, string> = {
+    sendEmail: "Claude can send email from this mailbox.",
+    sendInvitations: "Claude can invite guests to events, and change or delete events that have other guests. Google emails each guest.",
+    replyToInvitations: "Claude can accept, decline or tentatively accept invitations. Google tells the organizer.",
+  };
+  const permissionKeys = Object.keys(PERMISSION_FIELDS) as (keyof AccountPermissions)[];
   const acct = (m: Account, i: number) => {
     const id = esc(m.id);
     const relink = `/accounts/link?hint=${encodeURIComponent(m.email)}`;
+    const permissions = accountPermissions(m);
+    const calendar = hasCalendar(grantedScopes(m));
+    const onPills = permissionKeys
+      .filter((k) => permissions[k])
+      .map((k) => `<span class="pill send">${ICON.send}${permissionPills[k]}</span>`)
+      .join("");
+    const toggle = (k: keyof AccountPermissions) => {
+      const field = PERMISSION_FIELDS[k];
+      return `<label class="toggle" for="${field}-${id}">${esc(PERMISSION_LABELS[k])}<input id="${field}-${id}" type="checkbox" name="${field}" value="1"${permissions[k] ? " checked" : ""}></label>
+<p class="help">${permissionHelp[k]}</p>`;
+    };
     return `<details class="mbx"${opened(m) ? " open" : ""}>
 <summary><span class="id${m.status === "ok" ? "" : " warn"}">${mailboxId(i + 1)}</span>
 <span class="who"><b>${esc(m.name || m.email)}</b>${m.name ? `<span>${esc(m.email)}</span>` : ""}</span>
 <span class="pills">${m.status === "ok" ? `<span class="pill ok">Linked</span>` : `<span class="pill warn">${ICON.warn}Needs re-linking</span>`}${
-      m.allow_send === 1 ? `<span class="pill send">${ICON.send}Sending on</span>` : `<span class="pill">Sending off</span>`
-    }</span>
+      calendar ? `<span class="pill ok">Calendar</span>` : `<span class="pill">No calendar</span>`
+    }${onPills || `<span class="pill">Sending off</span>`}</span>
 <span class="chev">${ICON.chevron}</span></summary>
 <div class="body">
 ${m.status !== "ok" ? warning(`${esc(m.status_detail || "Google access stopped working.")} <a href="${relink}">Re-link</a>`) : ""}
@@ -694,10 +730,15 @@ ${m.status !== "ok" ? warning(`${esc(m.status_detail || "Google access stopped w
 <textarea id="context-${id}" name="context" placeholder="What this mailbox is for, who matters, what's urgent, what to ignore, how to sign replies…">${esc(m.context)}</textarea>
 </div>
 <div class="caps"><div class="label">What Claude can do here</div>
-${can("Search and read")}${can("Add and remove labels")}${can("Save drafts")}${can("Move threads to the trash")}
-<div class="send"><label class="toggle" for="send-${id}">Allow sending<input id="send-${id}" type="checkbox" name="allow_send" value="1"${m.allow_send === 1 ? " checked" : ""}></label>
-<p class="help">When you select <b>Allow sending</b>, Claude can send email from this mailbox. ${a} instructs Claude to send email only when you instruct it, never because an email requests it. This instruction reduces the risk that an email tricks Claude, but it cannot remove the risk.</p></div>
-<div class="r no"><span>Delete permanently</span><span class="v">${ICON.cross}Never</span></div>
+${can("Search and read email")}${can("Add and remove labels")}${can("Save drafts")}${can("Move threads to the trash")}
+${
+  calendar
+    ? `${can("Read the calendar and find free time")}${can("Create, change and delete events without guests")}`
+    : `<div class="r no"><span>Calendar is not linked. To add it, click <b>Re-link</b> and keep the Calendar check boxes selected.</span><span class="v">${ICON.cross}Off</span></div>`
+}
+<div class="send">${permissionKeys.map(toggle).join("\n")}
+<p class="help">${a} instructs Claude to do these actions only when you instruct it, never because an email or an event requests it. This instruction reduces the risk that an email or an event tricks Claude, but it cannot remove the risk.</p></div>
+<div class="r no"><span>Delete email permanently</span><span class="v">${ICON.cross}Never</span></div>
 </div></div>
 <div class="actions"><div class="row"><button>Save</button><a class="btn secondary" href="${relink}">Re-link</a></div>
 <button class="danger" formaction="/accounts/${id}/remove" onclick="return confirm('Remove ${esc(m.email)}? This also revokes its Google access.')">Remove</button></div>
@@ -709,7 +750,7 @@ ${can("Search and read")}${can("Add and remove labels")}${can("Save drafts")}${c
 <section class="sect" id="mailboxes">
 <div class="rule"><span class="n">01</span><span>Mailboxes</span><span class="end">${accounts.length} linked</span></div>
 <div class="title"><div><h1>Your mailboxes</h1>
-<p class="lede">Link each Gmail or Workspace mailbox. Claude can read these mailboxes only through ${a}. Claude can label, draft and trash email. Claude can send email only from a mailbox where you select <b>Allow sending</b>.</p></div>
+<p class="lede">Link each Gmail or Workspace mailbox. Claude can use these mailboxes and their calendars only through ${a}. Claude can label, draft and trash email, and create and change events. Claude can send email, send calendar invitations and reply to invitations only where you allow it.</p></div>
 <a class="btn" href="/accounts/link">${ICON.plus}Link a mailbox</a></div>
 <div class="panel raised ticks register">${
       accounts.length
@@ -735,7 +776,7 @@ ${can("Search and read")}${can("Add and remove labels")}${can("Save drafts")}${c
 <div class="label">Team and Enterprise plans</div>
 <p>On a Team or Enterprise plan, an Owner adds the connector once in <b>Organization settings → Connectors</b>, with <b>Add → Custom → Web</b>. Then each person opens <b>Customize → Connectors</b> and clicks <b>Connect</b> next to ${a}.</p>
 <div class="label">Tools</div>
-<p>Claude then has tools for every mailbox above. With these tools, Claude can list your mailboxes, search, read threads, apply labels, create drafts and trash threads. Claude can send drafts only from a mailbox where you select <b>Allow sending</b>.</p>
+<p>Claude then has tools for every mailbox above. With these tools, Claude can list your mailboxes, search, read threads, apply labels, create drafts and trash threads. Claude can also read calendars, find free time, and create, change and delete events. Claude can send drafts, send invitations and reply to invitations only where you allow it.</p>
 </div></div>
 </section>`,
     {
@@ -758,13 +799,21 @@ export function consentPage(
   accounts: Account[],
 ) {
   const a = esc(app);
+  const marks = (m: Account) => {
+    const p = accountPermissions(m);
+    return [
+      p.sendEmail ? `<span class="pill ok">Can send</span>` : "",
+      p.sendInvitations ? `<span class="pill ok">Can invite</span>` : "",
+      p.replyToInvitations ? `<span class="pill ok">Can reply</span>` : "",
+    ].join("");
+  };
   const mailboxes =
     accounts
       .map(
         (m, i) =>
           `<li><span class="id">${mailboxId(i + 1)}</span><span class="who"><b>${esc(m.name || m.email)}</b>${
             m.name ? `<span>${esc(m.email)}</span>` : ""
-          }</span>${m.allow_send === 1 ? `<span class="pill ok">Can send</span>` : ""}</li>`,
+          }</span>${marks(m)}</li>`,
       )
       .join("") || `<li class="muted">You have no linked mailboxes. The access also includes the mailboxes that you link later.</li>`;
   return page(
@@ -772,7 +821,7 @@ export function consentPage(
     `<div class="link" aria-hidden="true"><span class="ico">${ICON.client}</span><i></i><span class="via">OAuth</span><i></i>${mark(48)}</div>
 <div class="panel raised ticks accent consent">
 <div class="pad"><div class="label hot">Authorisation request</div>
-<h1>Allow ${esc(d.clientName)} to use your mailboxes?</h1>
+<h1>Allow ${esc(d.clientName)} to use your mailboxes and calendars?</h1>
 ${d.redirectIsLoopback ? warning("That address is on your computer. Continue only if you started this connection from an app on your computer a moment ago.") : ""}</div>
 <dl class="kv">
 <div><dt class="label">App from</dt><dd>${d.clientDomain ? esc(d.clientDomain) : `Not verified<span class="muted">This app registered itself. ${a} cannot verify its name.</span>`}</dd></div>
@@ -781,7 +830,9 @@ ${d.redirectIsLoopback ? warning("That address is on your computer. Continue onl
 <div class="grp"><div class="label">Mailboxes</div><ul class="mbl">${mailboxes}</ul></div>
 <div class="grp sunk"><div class="label">In these mailboxes, the app can</div><div class="can">
 <span>${ICON.check}Search and read email</span><span>${ICON.check}Label email</span><span>${ICON.check}Save drafts</span><span>${ICON.check}Move email to the trash</span>
-<span>${ICON.send}Send email from a mailbox with the mark Can send</span><span class="no">${ICON.cross}Not delete email permanently</span>
+<span>${ICON.check}Read calendars and find free time</span><span>${ICON.check}Create, change and delete events without guests</span>
+<span>${ICON.send}Send email from a mailbox with the mark Can send</span><span>${ICON.send}Send calendar invitations from a mailbox with the mark Can invite</span>
+<span>${ICON.send}Reply to invitations for a mailbox with the mark Can reply</span><span class="no">${ICON.cross}Not delete email permanently</span>
 </div></div>
 <form method="post" action="/authorize" class="grp decide">
 <input type="hidden" name="handle" value="${esc(handle)}">

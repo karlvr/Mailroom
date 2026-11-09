@@ -1,4 +1,4 @@
-import type { Env } from "./env";
+import { appName, type Env } from "./env";
 import {
   type Account,
   type GoogleConfig,
@@ -9,6 +9,17 @@ import {
 import { b64url, fromB64url } from "./crypto";
 
 export const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
+
+/** The Google permissions that the Calendar tools need. Calendar works only when Google grants all of them. */
+export const CALENDAR_SCOPES = [
+  "https://www.googleapis.com/auth/calendar.events",
+  "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+  "https://www.googleapis.com/auth/calendar.events.freebusy",
+];
+
+/** Returns true when `scopes` includes every Calendar permission. */
+export const hasCalendar = (scopes: readonly string[]) => CALENDAR_SCOPES.every((s) => scopes.includes(s));
+
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 
@@ -32,7 +43,7 @@ export function authorizeUrl(
     state: opts.state,
     code_challenge: opts.challenge,
     code_challenge_method: "S256",
-    scope: opts.mailbox ? `openid email ${GMAIL_SCOPE}` : "openid email",
+    scope: opts.mailbox ? ["openid", "email", GMAIL_SCOPE, ...CALENDAR_SCOPES].join(" ") : "openid email",
   });
   if (opts.mailbox) {
     // offline + consent guarantees a refresh token every time an account is (re)linked
@@ -151,7 +162,8 @@ async function accessToken(env: Env, account: Account): Promise<string> {
 
 const appUrlHint = "the Mailroom web page";
 
-export class GmailError extends Error {
+/** An error response from a Google API. The message is safe to show to Claude. */
+export class GoogleApiError extends Error {
   constructor(
     public status: number,
     message: string,
@@ -160,14 +172,30 @@ export class GmailError extends Error {
   }
 }
 
-/** Call the Gmail API for one linked account. `path` is relative to /gmail/v1/users/me. */
-export async function gmail<T>(
-  env: Env,
-  account: Account,
-  path: string,
-  init: { method?: string; query?: Record<string, string | string[] | undefined>; body?: unknown } = {},
-): Promise<T> {
-  const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me${path}`);
+/** A Google API that Mailroom calls for a linked account. */
+interface GoogleApi {
+  /** The name of the API, as the Google Cloud console shows it. */
+  name: string;
+  /** The URL that request paths are relative to. */
+  base: string;
+}
+
+const GMAIL_API: GoogleApi = { name: "Gmail", base: "https://gmail.googleapis.com/gmail/v1/users/me" };
+const CALENDAR_API: GoogleApi = { name: "Google Calendar", base: "https://www.googleapis.com/calendar/v3" };
+
+type ApiRequest = { method?: string; query?: Record<string, string | string[] | undefined>; body?: unknown };
+
+interface GoogleErrorBody {
+  error?: { message?: string; errors?: { reason?: string }[]; details?: { reason?: string }[] };
+}
+
+/** Returns true when Google refused a request because the API is not enabled in the Google Cloud project. */
+const isApiDisabled = (body: GoogleErrorBody) =>
+  !!body.error?.details?.some((d) => d.reason === "SERVICE_DISABLED") ||
+  !!body.error?.errors?.some((e) => e.reason === "accessNotConfigured");
+
+async function googleApi<T>(env: Env, account: Account, api: GoogleApi, path: string, init: ApiRequest): Promise<T> {
+  const url = new URL(`${api.base}${path}`);
   for (const [k, v] of Object.entries(init.query ?? {})) {
     if (v === undefined) continue;
     for (const item of Array.isArray(v) ? v : [v]) url.searchParams.append(k, item);
@@ -187,9 +215,23 @@ export async function gmail<T>(
       continue;
     }
     if (res.status === 204) return undefined as T;
-    const data = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
-    if (!res.ok) throw new GmailError(res.status, data.error?.message ?? `Gmail API error ${res.status}`);
+    const data = (await res.json().catch(() => ({}))) as GoogleErrorBody;
+    if (res.status === 403 && isApiDisabled(data)) {
+      throw new GoogleApiError(
+        403,
+        `The ${api.name} API is not enabled in the Google Cloud project of ${appName(env)}. The admin must enable it. See step 2 of the setup page.`,
+      );
+    }
+    if (!res.ok) throw new GoogleApiError(res.status, data.error?.message ?? `${api.name} API error ${res.status}`);
     return data as T;
   }
-  throw new GmailError(401, "Gmail rejected the access token");
+  throw new GoogleApiError(401, `${api.name} rejected the access token`);
 }
+
+/** Call the Gmail API for one linked account. `path` is relative to /gmail/v1/users/me. */
+export const gmail = <T>(env: Env, account: Account, path: string, init: ApiRequest = {}) =>
+  googleApi<T>(env, account, GMAIL_API, path, init);
+
+/** Call the Google Calendar API for one linked account. `path` is relative to /calendar/v3. */
+export const calendar = <T>(env: Env, account: Account, path: string, init: ApiRequest = {}) =>
+  googleApi<T>(env, account, CALENDAR_API, path, init);

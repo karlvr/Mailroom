@@ -89,8 +89,44 @@ export interface Account {
   status_detail: string | null;
   /** 1 when the owner allows Claude to send email from this mailbox, otherwise 0. */
   allow_send: number;
+  /** 1 when the owner allows Claude to send calendar invitations from this account, otherwise 0. */
+  allow_invite: number;
+  /** 1 when the owner allows Claude to reply to calendar invitations for this account, otherwise 0. */
+  allow_reply: number;
+  /** The Google permissions that the stored refresh token grants, separated by spaces. Null for an account linked before Mailroom recorded them. */
+  scopes: string | null;
   created_at: number;
   updated_at: number;
+}
+
+/**
+ * The actions of a linked account that notify other people. The owner allows each one separately,
+ * and each one is off until the owner allows it.
+ */
+export interface AccountPermissions {
+  /** True when Claude may send email from this mailbox. */
+  sendEmail: boolean;
+  /** True when Claude may invite guests to events, and change or delete events that have other guests. */
+  sendInvitations: boolean;
+  /** True when Claude may accept, decline or tentatively accept invitations. */
+  replyToInvitations: boolean;
+}
+
+/** The label of the setting that controls each permission, as the owner sees it on the web page. */
+export const PERMISSION_LABELS: Record<keyof AccountPermissions, string> = {
+  sendEmail: "Allow sending email",
+  sendInvitations: "Allow sending calendar invitations",
+  replyToInvitations: "Allow replies to invitations",
+};
+
+/** Returns the permissions that the owner gave to an account. */
+export function accountPermissions(a: Account): AccountPermissions {
+  return { sendEmail: a.allow_send === 1, sendInvitations: a.allow_invite === 1, replyToInvitations: a.allow_reply === 1 };
+}
+
+/** Returns the Google permissions that the stored refresh token of the account grants. */
+export function grantedScopes(a: Account): string[] {
+  return (a.scopes ?? "").split(" ").filter(Boolean);
 }
 
 /** The settings of a linked mailbox that its owner controls. */
@@ -99,11 +135,19 @@ export interface AccountDetails {
   name: string;
   /** Notes for Claude about the purpose of the mailbox and how to treat it. */
   context: string;
-  /** True when Claude may send email from this mailbox. */
-  allowSend: boolean;
+  permissions: AccountPermissions;
 }
 
-const ACCOUNT_COLS = "id, user_id, email, name, context, status, status_detail, allow_send, created_at, updated_at";
+/** A Google account that the owner linked, with the access that Google granted. */
+export interface LinkedGoogleAccount {
+  email: string;
+  refreshToken: string;
+  /** The Google permissions that the refresh token grants. */
+  scopes: string[];
+}
+
+const ACCOUNT_COLS =
+  "id, user_id, email, name, context, status, status_detail, allow_send, allow_invite, allow_reply, scopes, created_at, updated_at";
 
 export async function listAccounts(env: Env, userId: string): Promise<Account[]> {
   const { results } = await env.DB.prepare(
@@ -123,17 +167,18 @@ export async function findAccount(env: Env, userId: string, ref: string): Promis
     .first<Account>();
 }
 
-export async function saveLinkedAccount(env: Env, userId: string, email: string, refreshToken: string): Promise<void> {
+export async function saveLinkedAccount(env: Env, userId: string, link: LinkedGoogleAccount): Promise<void> {
   const now = Date.now();
   const id = randomToken(9);
-  const enc = await encrypt(await dataKey(env), refreshToken, `refresh:${userId}:${email.toLowerCase()}`);
+  const enc = await encrypt(await dataKey(env), link.refreshToken, `refresh:${userId}:${link.email.toLowerCase()}`);
   await env.DB.prepare(
-    `INSERT INTO accounts (id, user_id, email, name, context, refresh_token, status, created_at, updated_at)
-     VALUES (?, ?, ?, '', '', ?, 'ok', ?, ?)
+    `INSERT INTO accounts (id, user_id, email, name, context, refresh_token, scopes, status, created_at, updated_at)
+     VALUES (?, ?, ?, '', '', ?, ?, 'ok', ?, ?)
      ON CONFLICT(user_id, email) DO UPDATE SET
-       refresh_token = excluded.refresh_token, status = 'ok', status_detail = NULL, updated_at = excluded.updated_at`,
+       refresh_token = excluded.refresh_token, scopes = excluded.scopes, status = 'ok', status_detail = NULL,
+       updated_at = excluded.updated_at`,
   )
-    .bind(id, userId, email, enc, now, now)
+    .bind(id, userId, link.email, enc, link.scopes.join(" "), now, now)
     .run();
 }
 
@@ -151,10 +196,21 @@ export async function updateAccountDetails(
   id: string,
   details: AccountDetails,
 ): Promise<void> {
+  const p = details.permissions;
   await env.DB.prepare(
-    "UPDATE accounts SET name = ?, context = ?, allow_send = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+    `UPDATE accounts SET name = ?, context = ?, allow_send = ?, allow_invite = ?, allow_reply = ?, updated_at = ?
+     WHERE id = ? AND user_id = ?`,
   )
-    .bind(details.name.slice(0, 100), details.context.slice(0, 8000), details.allowSend ? 1 : 0, Date.now(), id, userId)
+    .bind(
+      details.name.slice(0, 100),
+      details.context.slice(0, 8000),
+      p.sendEmail ? 1 : 0,
+      p.sendInvitations ? 1 : 0,
+      p.replyToInvitations ? 1 : 0,
+      Date.now(),
+      id,
+      userId,
+    )
     .run();
 }
 
