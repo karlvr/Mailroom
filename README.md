@@ -9,6 +9,8 @@ Mailroom is a self-hosted Cloudflare Worker. It lets Claude work across **all yo
 - Mailroom instructs Claude to treat email and calendar content as data, never as instructions.
 - Mailroom runs only on your own Cloudflare account, and no third party operates it. Mailroom encrypts the Google tokens that it stores.
 
+The Mailroom software is free of charge. You pay the costs of your Cloudflare account and your Google Cloud project. Read [Costs](#costs) before you deploy.
+
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/karlvr/mailroom)
 
 ## Setup
@@ -240,8 +242,39 @@ Do not edit a migration after you push it, because deployments that already appl
 
 `npm run deploy` applies the migrations first and then deploys the new code. While the build runs, the old code runs on the new schema. If the deploy fails, the old code continues to run on the new schema. Thus a migration must only add tables, or add columns that are nullable or have a default. Remove or rename a column only in a later release, after no code uses it.
 
+## Costs
+
+The Mailroom software is free of charge, under the [MIT License](LICENSE). Mailroom runs on your Cloudflare account and uses your Google Cloud project, and these services can have costs. You pay these costs. Prices, allowances and limits can change, so read the current pricing pages before you choose a plan. Your Worker also shows these links at `/costs`.
+
+### Cloudflare
+
+Mailroom uses Workers, Workers KV, D1, static assets and Workers Logs. It does not use Durable Objects, Queues or Cron Triggers.
+
+- The Workers Free plan includes a daily allowance for each service that has a charge. On the Free plan, Cloudflare does not charge for use above an allowance. Instead, requests can fail until the allowance resets.
+- The Free plan also limits the CPU time of each request. A request that reads a large email can go over this limit and fail. The Workers Paid plan has a higher limit. It has a minimum monthly charge, and Cloudflare charges for use above the amounts that it includes.
+- The `workers.dev` address has no charge. For a custom domain, you pay only for the domain.
+
+Pricing pages: [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [Workers limits](https://developers.cloudflare.com/workers/platform/limits/), [Workers KV](https://developers.cloudflare.com/kv/platform/pricing/), [D1](https://developers.cloudflare.com/d1/platform/pricing/), [Observability (Workers Logs)](https://developers.cloudflare.com/observability/pricing/).
+
+### Google
+
+- Mailroom uses a Google Cloud project for Google sign-in, the Gmail API and the Google Calendar API. Google does not charge for standard use of these APIs. Google plans to charge for use above a daily threshold for each API, and states that it will give at least 90 days' notice.
+- Google limits the number of users of an unverified app. For more users, Google must verify the app. Mailroom uses the restricted `gmail.modify` permission, so the verification includes a security assessment each year. An independent assessor does the assessment and can charge a fee.
+
+Pages: [Gmail API usage limits](https://developers.google.com/workspace/gmail/api/reference/quota), [Calendar API usage limits](https://developers.google.com/workspace/calendar/api/guides/quota), [Unverified apps](https://support.google.com/cloud/answer/7454865), [Security assessment](https://support.google.com/cloud/answer/13465431).
+
+### Responsibility for costs
+
+This section is for information only. It can be incomplete or out of date.
+
+The authors supply the Mailroom software under the [MIT License](LICENSE), "as is", without warranty of any kind. The licence also states that the authors are not liable for any claim, damages or other liability in connection with the software. To the extent that the law permits, the authors are not liable for any cost, charge or fee from Cloudflare, Google or another provider.
+
 ## Limits
 
 - **Up to 100 Google users** while Google has not verified the app. Each person counts once, however many mailboxes they link. For more users, you need Google's verification and an annual security assessment (CASA).
 - **Plain-text drafts only.** A forward has the plain text of the forwarded message, not its formatting.
 - **Attachments:** a forward copies the attachments of the message, up to 10 MB in total. `get_thread` lists the names of attachments, but no tool gives the content of an attachment to Claude.
+
+## License
+
+Mailroom uses the [MIT License](LICENSE).

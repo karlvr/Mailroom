@@ -26,6 +26,7 @@ import {
   adminLoginPage,
   consentPage,
   contextPage,
+  costsPage,
   dashboardPage,
   favicon,
   landingPage,
@@ -124,6 +125,7 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
     if (path === "/" && method === "GET") return home(req, env, origin, app);
     if (path === "/privacy" && method === "GET") return privacyPage(app, origin);
     if (path === "/terms" && method === "GET") return termsPage(app, origin);
+    if (path === "/costs" && method === "GET") return costsPage(app);
     if (path === "/setup" && method === "GET") return setupGet(req, env, origin, app);
     if (path === "/setup/login" && method === "POST") return setupLogin(req, env, origin, app);
     if (path === "/setup" && method === "POST") return setupSave(req, env, origin, app);

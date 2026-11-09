@@ -284,6 +284,12 @@ input[type=checkbox]{flex:none;width:18px;height:18px;margin:0;accent-color:var(
 .vlist .m{font:12px var(--mono);color:var(--muted)}
 .proposal+.proposal{margin-top:24px}
 .proposal .actions{justify-content:flex-start}
+.refs{margin:16px 0 0;padding:0;list-style:none;border-top:1px solid var(--line)}
+.refs li{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:2px 16px;margin:0;padding:10px 0;border-bottom:1px solid var(--line)}
+.refs a{font-weight:500}
+.refs span{font:12.5px var(--mono);color:var(--muted)}
+@media (max-width:560px){.refs li{flex-direction:column}}
+.stack>.notice{margin:0}
 `;
 
 const TIME_JS = `document.querySelectorAll('time[datetime]').forEach(t=>{t.textContent=new Date(t.dateTime).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'})})`;
@@ -395,7 +401,7 @@ export function page(title: string, body: string, opts: PageOptions): Response {
 <main class="${opts.width ?? "text"}">
 ${body}
 </main>
-<footer class="foot"><div><span>${app} is a self-hosted mailbox and calendar connector for Claude. Claude can send email and calendar invitations only from an account where you allow it.</span><span><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></span></div></footer>
+<footer class="foot"><div><span>${app} is a self-hosted mailbox and calendar connector for Claude. Claude can send email and calendar invitations only from an account where you allow it.</span><span><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/costs">Costs</a></span></div></footer>
 </div><script>${COPY_JS};${TIME_JS}</script></body></html>`;
   return new Response(html, {
     headers: {
@@ -582,6 +588,7 @@ ${subSteps([
 <div class="stack">
 ${s.saved ? `<div class="notice ok">${a} saved the settings. <a href="/">Sign in and link your mailboxes →</a></div>` : ""}
 ${s.error ? warning(esc(s.error)) : ""}
+<div class="notice info"><span>The Mailroom software is free of charge. You pay the costs of your Cloudflare account and your Google Cloud project. To decide which plans you need, read <a href="/costs">Costs</a>.</span></div>
 ${cards}
 </div></div>`,
     { app, tag: "Admin", width: "wide", aside: `<a href="/">Back to ${a}</a>` },
@@ -697,6 +704,47 @@ ${section(
 ${section(
   "Changes",
   `<p>The operator can change these terms or stop your access at any time. You can stop the use of ${a} at any time. For information about how ${a} uses your data, read the <a href="/privacy">privacy policy</a>.</p>`,
+)}`,
+    { app },
+  );
+}
+
+export function costsPage(app: string) {
+  const a = esc(app);
+  const ref = (href: string, text: string, about: string) =>
+    `<li><a href="${href}" target="_blank" rel="noopener">${text}</a><span>${about}</span></li>`;
+  return page(
+    "Costs",
+    `<h1>Costs</h1>
+<p class="lede">The Mailroom software is free of charge. ${a} runs on a Cloudflare account and uses a Google Cloud project, and these services can have costs. The person or organisation that deployed ${a} pays these costs. This page lists the services that ${a} uses, with links to their prices. Use these links to decide which plans you need.</p>
+${section(
+  "Cloudflare",
+  `<p>${a} uses Workers, Workers KV, D1, static assets and Workers Logs. The Workers Free plan includes a daily allowance for each service that has a charge. On the Free plan, Cloudflare does not charge for use above an allowance. Instead, requests can fail until the allowance resets.</p>
+<p>The Free plan also limits the CPU time of each request. A request that reads a large email can go over this limit and fail. The Workers Paid plan has a higher limit. It has a minimum monthly charge, and Cloudflare charges for use above the amounts that it includes.</p>
+<ul class="refs">
+${ref("https://developers.cloudflare.com/workers/platform/pricing/", "Workers pricing", "Plans, requests, CPU time, static assets")}
+${ref("https://developers.cloudflare.com/workers/platform/limits/", "Workers limits", "CPU time for each request")}
+${ref("https://developers.cloudflare.com/kv/platform/pricing/", "Workers KV pricing", "Reads, writes, storage")}
+${ref("https://developers.cloudflare.com/d1/platform/pricing/", "D1 pricing", "Rows read, rows written, storage")}
+${ref("https://developers.cloudflare.com/observability/pricing/", "Observability pricing", "Workers Logs")}
+</ul>`,
+)}
+${section(
+  "Google",
+  `<p>${a} uses a Google Cloud project for Google sign-in, the Gmail API and the Google Calendar API. Google does not charge for standard use of these APIs. Google plans to charge for use above a daily threshold for each API, and states that it will give at least 90 days’ notice.</p>
+<p>Google limits the number of users of an unverified app. For more users, Google must verify the app. ${a} uses a restricted Gmail permission, so the verification includes a security assessment each year. An independent assessor does the assessment and can charge a fee.</p>
+<ul class="refs">
+${ref("https://developers.google.com/workspace/gmail/api/reference/quota", "Gmail API usage limits", "Quotas, daily billing threshold")}
+${ref("https://developers.google.com/workspace/calendar/api/guides/quota", "Calendar API usage limits", "Quotas, daily billing threshold")}
+${ref("https://support.google.com/cloud/answer/7454865", "Unverified apps", "The user limit")}
+${ref("https://support.google.com/cloud/answer/13465431", "Security assessment", "Verification of restricted permissions")}
+</ul>`,
+)}
+${section(
+  "Responsibility for costs",
+  `<p>The operator of ${a} is responsible for all costs of the Cloudflare account, the Google Cloud project and the other services that ${a} uses. Prices, allowances and limits can change at any time. Before you choose a plan, read the current pricing page of each provider.</p>
+<p>This page is for information only. It can be incomplete or out of date.</p>
+<p>The authors of the Mailroom software supply it under the <a href="https://github.com/karlvr/mailroom/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>, “as is”, without warranty of any kind. The licence also states that the authors are not liable for any claim, damages or other liability in connection with the software. To the extent that the law permits, the authors are not liable for any cost, charge or fee from Cloudflare, Google or another provider.</p>`,
 )}`,
     { app },
   );
