@@ -3,6 +3,8 @@ import { appName, type Env } from "./env";
 import { randomToken, safeEqual, sha256 } from "./crypto";
 import {
   type AccountPermissions,
+  type ContextSubject,
+  GLOBAL_CONTEXT,
   contextHistory,
   contextSummaries,
   decideProposal,
@@ -16,6 +18,8 @@ import {
   getSetupVersion,
   isAllowed,
   listAccounts,
+  liveContext,
+  saveGlobalContext,
   saveGoogleConfig,
   saveLinkedAccount,
   setConfig,
@@ -27,11 +31,13 @@ import {
 import { GMAIL_SCOPE, authorizeUrl, exchangeCode, hasCalendar, pkcePair, revokeToken } from "./google";
 import {
   APP_ICONS,
+  type ContextPageSubject,
   type MessageCode,
   PERMISSION_FIELDS,
   SETUP_VERSION,
   adminLoginPage,
   consentPage,
+  contextHref,
   contextPage,
   contextPreview,
   costsPage,
@@ -150,14 +156,20 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
     if (path === "/authorize") return authorize(req, env, app);
     const m = path.match(/^\/accounts\/([\w-]+)(\/remove)?$/);
     if (m && method === "POST") return accountPost(req, env, ctx, m[1], !!m[2]);
-    const history = path.match(/^\/accounts\/([\w-]+)\/context$/);
-    if (history && method === "GET") return contextGet(req, env, app, history[1]);
-    const preview = path.match(/^\/accounts\/([\w-]+)\/context\/preview$/);
-    if (preview && method === "POST") return previewPost(req, env, preview[1]);
-    const proposal = path.match(/^\/accounts\/([\w-]+)\/context\/proposals\/(\d+)$/);
-    if (proposal && method === "POST") return proposalPost(req, env, proposal[1], Number(proposal[2]));
-    const restore = path.match(/^\/accounts\/([\w-]+)\/context\/versions\/(\d+)\/restore$/);
-    if (restore && method === "POST") return restorePost(req, env, restore[1], Number(restore[2]));
+    // The routes of the global context start with /context. The routes of the context of a mailbox
+    // start with /accounts/{id}/context.
+    const context = path.match(/^(?:\/accounts\/([\w-]+))?\/context(\/.*)?$/);
+    if (context) {
+      const subject: ContextSubject = context[1] ? { kind: "account", accountId: context[1] } : GLOBAL_CONTEXT;
+      const rest = context[2] ?? "";
+      if (rest === "" && method === "GET") return contextGet(req, env, app, subject);
+      if (rest === "" && method === "POST" && subject.kind === "global") return globalContextPost(req, env);
+      if (rest === "/preview" && method === "POST") return previewPost(req, env, subject);
+      const proposal = rest.match(/^\/proposals\/(\d+)$/);
+      if (proposal && method === "POST") return proposalPost(req, env, subject, Number(proposal[1]));
+      const restore = rest.match(/^\/versions\/(\d+)\/restore$/);
+      if (restore && method === "POST") return restorePost(req, env, subject, Number(restore[1]));
+    }
     const notFound = messagePage(app, "Not found", "This page does not exist.", { href: "/", text: "Home page" });
     return new Response(notFound.body, { status: 404, headers: notFound.headers });
   } catch (e) {
@@ -178,9 +190,9 @@ async function home(req: Request, env: Env, origin: string, app: string) {
   if (!cfg || !session) return landingPage(app, origin, !!cfg);
   const messages = messageCodes(new URL(req.url).searchParams.getAll("msg"));
   const accounts = await listAccounts(env, session.userId);
-  const history = await contextSummaries(env, session.userId);
+  const contexts = await contextSummaries(env, session.userId);
   const setupOutdated = (await getSetupVersion(env)) < SETUP_VERSION;
-  return dashboardPage(app, origin, session.email, accounts, history, session.csrf, { messages, setupOutdated });
+  return dashboardPage(app, origin, session.email, accounts, contexts, session.csrf, { messages, setupOutdated });
 }
 
 async function setupGet(
@@ -392,20 +404,26 @@ async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: st
 
 // ---------- context history ----------
 
-const historyUrl = (accountId: string, ...messages: MessageCode[]) =>
-  withMessages(`/accounts/${encodeURIComponent(accountId)}/context`, ...messages);
+const historyUrl = (subject: ContextSubject, ...messages: MessageCode[]) => withMessages(contextHref(subject), ...messages);
 
-async function contextGet(req: Request, env: Env, app: string, id: string) {
+async function contextGet(req: Request, env: Env, app: string, subject: ContextSubject) {
   const session = await getUserSession(env, req);
   const url = new URL(req.url);
   if (!session) return redirect(`/login?next=${encodeURIComponent(url.pathname + url.search)}`);
-  const account = (await listAccounts(env, session.userId)).find((a) => a.id === id);
-  if (!account) return messagePage(app, "Not found", "This mailbox does not exist, or it is not yours.", { href: "/", text: "Home page" });
-  const { versions, proposal } = await contextHistory(env, session.userId, id);
+  const notFound = () =>
+    messagePage(app, "Not found", "This mailbox does not exist, or it is not yours.", { href: "/", text: "Home page" });
+  let owner: ContextPageSubject = GLOBAL_CONTEXT;
+  if (subject.kind === "account") {
+    const account = await findAccount(env, session.userId, subject.accountId);
+    if (!account) return notFound();
+    owner = { kind: "account", account };
+  }
+  const history = await contextHistory(env, session.userId, subject);
+  if (!history) return notFound();
   const compare = url.searchParams.get("compare");
-  return contextPage(app, session.email, account, {
-    versions,
-    proposal,
+  return contextPage(app, session.email, owner, {
+    versions: history.versions,
+    proposal: history.proposal,
     selectedId: Number(url.searchParams.get("v")) || undefined,
     compare: compare === "text" || compare === "next" || compare === "current" ? compare : "previous",
     csrf: session.csrf,
@@ -413,50 +431,59 @@ async function contextGet(req: Request, env: Env, app: string, id: string) {
   });
 }
 
-async function proposalPost(req: Request, env: Env, id: string, proposalId: number) {
+async function proposalPost(req: Request, env: Env, subject: ContextSubject, proposalId: number) {
   const session = await getUserSession(env, req);
   if (!session) return redirect("/");
   const f = await form(req);
-  if (!checkCsrf(f, session.csrf)) return redirect(historyUrl(id, "form-expired"));
+  if (!checkCsrf(f, session.csrf)) return redirect(historyUrl(subject, "form-expired"));
   const accept = f.get("decision") === "accept";
   // The review form sends the text of the proposal, which the user can edit.
   const text = f.has("context") ? String(f.get("context")) : undefined;
   if (text !== undefined && text.replace(/\r\n/g, "\n").length > MAX_CONTEXT_CHARS) {
-    return redirect(historyUrl(id, "context-too-long"));
+    return redirect(historyUrl(subject, "context-too-long"));
   }
-  const result = await decideProposal(env, session.userId, id, proposalId, { accept, editor: session.email, text });
+  const result = await decideProposal(env, session.userId, subject, proposalId, { accept, editor: session.email, text });
   const messages = {
     accepted: "accepted",
     edited: "edited",
     rejected: "rejected",
     not_found: "proposal-not-found",
   } satisfies Record<typeof result, MessageCode>;
-  return redirect(historyUrl(id, messages[result]));
+  return redirect(historyUrl(subject, messages[result]));
 }
 
-/** Returns the diff of the current context of a mailbox and the posted text, as an HTML fragment. */
-async function previewPost(req: Request, env: Env, id: string) {
+/** Returns the diff of the current context of a subject and the posted text, as an HTML fragment. */
+async function previewPost(req: Request, env: Env, subject: ContextSubject) {
   const session = await getUserSession(env, req);
   if (!session) return new Response(null, { status: 401 });
   const f = await form(req);
   if (!checkCsrf(f, session.csrf)) return new Response(null, { status: 403 });
-  const account = await findAccount(env, session.userId, id);
-  if (!account) return new Response(null, { status: 404 });
-  return contextPreview(account.context, String(f.get("context") ?? ""));
+  const live = await liveContext(env, session.userId, subject);
+  if (live === null) return new Response(null, { status: 404 });
+  return contextPreview(live, String(f.get("context") ?? ""));
 }
 
-async function restorePost(req: Request, env: Env, id: string, versionId: number) {
+async function globalContextPost(req: Request, env: Env) {
   const session = await getUserSession(env, req);
   if (!session) return redirect("/");
   const f = await form(req);
-  if (!checkCsrf(f, session.csrf)) return redirect(historyUrl(id, "form-expired"));
-  const result = await restoreContextVersion(env, session.userId, id, versionId, session.email);
+  if (!checkCsrf(f, session.csrf)) return redirect(withMessages("/", "form-expired"));
+  await saveGlobalContext(env, session.userId, String(f.get("context") ?? "").trim(), session.email);
+  return redirect(withMessages("/", "saved"));
+}
+
+async function restorePost(req: Request, env: Env, subject: ContextSubject, versionId: number) {
+  const session = await getUserSession(env, req);
+  if (!session) return redirect("/");
+  const f = await form(req);
+  if (!checkCsrf(f, session.csrf)) return redirect(historyUrl(subject, "form-expired"));
+  const result = await restoreContextVersion(env, session.userId, subject, versionId, session.email);
   const messages = {
     restored: "restored",
     unchanged: "unchanged",
     not_found: "version-not-found",
   } satisfies Record<typeof result, MessageCode>;
-  return redirect(historyUrl(id, messages[result]));
+  return redirect(historyUrl(subject, messages[result]));
 }
 
 // ---------- OAuth for Claude (MCP clients) ----------

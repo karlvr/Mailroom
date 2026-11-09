@@ -1,8 +1,11 @@
 import {
   type Account,
   type AccountPermissions,
+  type ContextSubject,
+  type ContextSummaries,
   type ContextSummary,
   type ContextVersion,
+  GLOBAL_CONTEXT,
   MAX_CONTEXT_CHARS,
   PERMISSION_LABELS,
   accountPermissions,
@@ -772,9 +775,9 @@ export function privacyPage(app: string, origin: string) {
 <p class="lede">This policy applies to ${a} at <b>${esc(new URL(origin).host)}</b>. ${a} connects Gmail and Google Workspace mailboxes and calendars to Claude. The person or organisation that deployed ${a} operates it. Cloudflare hosts it.</p>
 ${section(
   `Data that ${a} stores`,
-  `<ul><li>Your Google account ID, your email address, and the times of your first and last sign-in.</li>
+  `<ul><li>Your Google account ID, your email address, your global context, and the times of your first and last sign-in.</li>
 <li>For each mailbox that you link: its address, its short name, its context notes, the settings <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.replyToInvitations)}</b>, the Google permissions that you granted, and a Google refresh token. ${a} encrypts the token before it stores it.</li>
-<li>For each mailbox: each version of its context notes that you saved or accepted, when the version became current, and who made it. For a change that an agent proposed, ${a} also stores the name of the app, and the name and the reason that the agent gave. ${a} deletes a proposal when you reject it.</li>
+<li>For your global context and for each mailbox: each version of the context notes that you saved or accepted, when the version became current, and who made it. For a change that an agent proposed, ${a} also stores the name of the app, and the name and the reason that the agent gave. ${a} deletes a proposal when you reject it.</li>
 <li>Your web session, and a record of each Claude connection that you approve.</li></ul>
 <p>${a} does not store the content of your email or your calendar events.</p>`,
 )}
@@ -883,7 +886,9 @@ export const PERMISSION_FIELDS: Record<keyof AccountPermissions, string> = {
   replyToInvitations: "allow_reply",
 };
 
-const historyHref = (accountId: string) => `/accounts/${encodeURIComponent(accountId)}/context`;
+/** Returns the path of the history page of a context. The paths of the actions on that context start with it. */
+export const contextHref = (s: ContextSubject) =>
+  s.kind === "global" ? "/context" : `/accounts/${encodeURIComponent(s.accountId)}/context`;
 
 /** Returns a time as a `<time>` element. The page script shows it in the time zone of the browser. */
 const when = (ms: number) =>
@@ -983,19 +988,23 @@ editButton.addEventListener('click',()=>{show('edit');tabs.parentElement.scrollI
 show('diff');
 })`;
 
-/** Returns the line under the context of a mailbox: when the context changed, by whom, and a link to its history. */
-function contextMeta(m: Account, summary: ContextSummary | undefined, viewer: string): string {
+/** Returns the line under a context: when the context changed, by whom, and a link to its history. */
+function contextMeta(subject: ContextSubject, summary: ContextSummary | null | undefined, viewer: string): string {
   if (!summary?.latest) return "";
   const versions = `${summary.versions} ${summary.versions === 1 ? "version" : "versions"}`;
-  return `<p class="ctx-meta">${changeHtml(summary.latest, viewer)} · <a href="${historyHref(m.id)}">History (${versions})</a></p>`;
+  return `<p class="ctx-meta">${changeHtml(summary.latest, viewer)} · <a href="${contextHref(subject)}">History (${versions})</a></p>`;
 }
+
+/** Returns the band that shows that a proposal for a context waits for the user. */
+const proposalBand = (subject: ContextSubject) =>
+  `<div class="band"><span class="label">Proposal waiting</span><p>An agent proposed a change to the context. The context changes only when you accept it.</p><a class="btn" href="${contextHref(subject)}#proposal">Review the proposal${ICON.arrow}</a></div>`;
 
 export function dashboardPage(
   app: string,
   origin: string,
   who: string,
   accounts: Account[],
-  history: Map<string, ContextSummary>,
+  contexts: ContextSummaries,
   csrf: string,
   notices: {
     /** The messages to show at the top of the page. */
@@ -1006,7 +1015,8 @@ export function dashboardPage(
 ) {
   const a = esc(app);
   const mcpUrl = `${origin}/mcp`;
-  const hasProposal = (m: Account) => history.get(m.id)?.hasProposal ?? false;
+  const subject = (m: Account): ContextSubject => ({ kind: "account", accountId: m.id });
+  const hasProposal = (m: Account) => contexts.accounts.get(m.id)?.hasProposal ?? false;
   // Each mailbox starts collapsed, unless it is the only one or it still needs a name or context notes.
   const opened = (m: Account) => accounts.length === 1 || !m.name || !m.context;
   const can = (text: string) => `<div class="r"><span>${text}</span><span class="v">${ICON.check}Allowed</span></div>`;
@@ -1046,20 +1056,16 @@ export function dashboardPage(
     }</span>
 <span class="chev">${ICON.chevron}</span></summary>
 <div class="body">
-${
-  hasProposal(m)
-    ? `<div class="band"><span class="label">Proposal waiting</span><p>An agent proposed a change to the context. The context changes only when you accept it.</p><a class="btn" href="${historyHref(m.id)}#proposal">Review the proposal${ICON.arrow}</a></div>`
-    : ""
-}
+${hasProposal(m) ? proposalBand(subject(m)) : ""}
 ${m.status !== "ok" ? warning(`${esc(m.status_detail || "Google access stopped working.")} <a href="${relink}">Re-link</a>`) : ""}
 <form method="post" action="/accounts/${id}">
 <input type="hidden" name="csrf" value="${esc(csrf)}">
 <div class="cols"><div class="fields">
 <label for="name-${id}">Short name <span class="hint">Claude uses this name for the mailbox</span></label>
 <input id="name-${id}" type="text" name="name" value="${esc(m.name)}" placeholder="For example, Support">
-<label for="context-${id}">Context for Claude</label>
+<label for="context-${id}">Context for Claude <span class="hint">Takes precedence over the global context</span></label>
 <textarea id="context-${id}" name="context" placeholder="What this mailbox is for, who matters, what's urgent, what to ignore, how to sign replies…">${esc(m.context)}</textarea>
-${contextMeta(m, history.get(m.id), who)}
+${contextMeta(subject(m), contexts.accounts.get(m.id), who)}
 </div>
 <div class="caps"><div class="label">What Claude can do here</div>
 ${can("Search and read email")}${can("Add and remove labels")}${can("Save drafts and forwards")}${can("Move threads to the trash")}
@@ -1084,20 +1090,41 @@ ${
     ? warning(`This version of ${a} needs a new setup step. The admin must open the <a href="/setup">setup page</a> and do the steps marked New. Until then, some tools can fail.`)
     : ""
 }
+<section class="sect" id="global">
+<div class="rule"><span class="n">01</span><span>Global context</span><span class="end">Every mailbox</span></div>
+<div class="panel raised ticks">
+${contexts.global.summary?.hasProposal ? proposalBand(GLOBAL_CONTEXT) : ""}
+<form method="post" action="${contextHref(GLOBAL_CONTEXT)}">
+<input type="hidden" name="csrf" value="${esc(csrf)}">
+<div class="cols"><div class="fields">
+<label for="context-global">Global context for Claude <span class="hint">Applies to every mailbox</span></label>
+<textarea id="context-global" name="context" placeholder="Who you are, what you work on, your priorities, how you write…">${esc(contexts.global.context)}</textarea>
+${contextMeta(GLOBAL_CONTEXT, contexts.global.summary, who)}
+</div>
+<div class="caps"><div class="label">How Claude uses it</div>
+<div class="r"><span>Claude follows the global context in every mailbox.</span></div>
+<div class="r"><span>Where the context of a mailbox conflicts with the global context, Claude follows the context of the mailbox.</span></div>
+<div class="r"><span>Put notes about one mailbox in the context of that mailbox.</span></div>
+<div class="r"><span>An agent can only propose a change. The global context changes only when you accept it.</span></div>
+</div></div>
+<div class="actions"><div class="row"><button>Save</button></div></div>
+</form></div>
+</section>
+
 <section class="sect" id="mailboxes">
-<div class="rule"><span class="n">01</span><span>Mailboxes</span><span class="end">${accounts.length} linked</span></div>
+<div class="rule"><span class="n">02</span><span>Mailboxes</span><span class="end">${accounts.length} linked</span></div>
 <div class="title"><div><h1>Your mailboxes</h1>
 <p class="lede">Link each Gmail or Workspace mailbox. Claude can use these mailboxes and their calendars only through ${a}. Claude can label, draft and trash email, and create and change events. Claude can send email, send calendar invitations and reply to invitations only where you allow it.</p></div>
 <a class="btn" href="/accounts/link">${ICON.plus}Link a mailbox</a></div>
 <div class="panel raised ticks register">${
       accounts.length
-        ? `${accounts.map(acct).join("")}<p class="note">${a} instructs Claude to read the context notes of a mailbox before it works in that mailbox.</p>`
+        ? `${accounts.map(acct).join("")}<p class="note">${a} instructs Claude to read the global context and the context notes of a mailbox before it works in that mailbox.</p>`
         : `<div class="empty">${motif()}<p>You have no linked mailboxes.</p><a class="btn secondary" href="/accounts/link">Link your first mailbox</a></div>`
     }</div>
 </section>
 
 <section class="sect" id="connect">
-<div class="rule"><span class="n">02</span><span>Connect Claude</span><span class="end">Custom connector</span></div>
+<div class="rule"><span class="n">03</span><span>Connect Claude</span><span class="end">Custom connector</span></div>
 <div class="panel connect">
 <ol class="steps">
 <li><div>In Claude, open <b>Customize → Connectors</b>.</div></li>
@@ -1113,7 +1140,7 @@ ${
 <div class="label">Team and Enterprise plans</div>
 <p>On a Team or Enterprise plan, an Owner adds the connector once in <b>Organization settings → Connectors</b>, with <b>Add → Custom → Web</b>. Then each person opens <b>Customize → Connectors</b> and clicks <b>Connect</b> next to ${a}.</p>
 <div class="label">Tools</div>
-<p>Claude then has tools for every mailbox above. With these tools, Claude can list your mailboxes, search, read threads, apply labels, create drafts and forwards, and trash threads. Claude can also read calendars, find free time, and create, change and delete events. Claude can propose changes to the context of a mailbox, and you accept or reject each proposal. Claude can send drafts, send invitations and reply to invitations only where you allow it.</p>
+<p>Claude then has tools for every mailbox above. With these tools, Claude can list your mailboxes, search, read threads, apply labels, create drafts and forwards, and trash threads. Claude can also read calendars, find free time, and create, change and delete events. Claude can propose changes to the global context and to the context of each mailbox, and you accept or reject each proposal. Claude can send drafts, send invitations and reply to invitations only where you allow it.</p>
 </div></div>
 </section>`,
     {
@@ -1183,7 +1210,10 @@ ${d.redirectIsLoopback ? warning("That address is on your computer. Continue onl
 /** How the history page shows the selected version: its text, or its changes against another version. */
 export type ContextCompare = "text" | "previous" | "next" | "current";
 
-/** The data of the context history page of one mailbox. */
+/** The context that a history page shows: the global context, or the context of one mailbox. */
+export type ContextPageSubject = { kind: "global" } | { kind: "account"; account: Account };
+
+/** The data of the history page of one context. */
 export interface ContextPageData {
   /** The accepted versions, oldest first. */
   versions: ContextVersion[];
@@ -1197,9 +1227,9 @@ export interface ContextPageData {
   messages?: readonly MessageCode[];
 }
 
-export function contextPage(app: string, who: string, account: Account, h: ContextPageData) {
+export function contextPage(app: string, who: string, owner: ContextPageSubject, h: ContextPageData) {
   const a = esc(app);
-  const base = historyHref(account.id);
+  const base = contextHref(owner.kind === "global" ? GLOBAL_CONTEXT : { kind: "account", accountId: owner.account.id });
   const { versions } = h;
   const current = versions[versions.length - 1] as ContextVersion | undefined;
   const position = new Map(versions.map((v, i) => [v.id, i]));
@@ -1235,7 +1265,8 @@ ${esc(p.context)}</textarea>
   };
 
   const selected = versions.find((v) => v.id === h.selectedId) ?? current;
-  let versionsHtml = `<div class="panel pad"><p>This mailbox has no context yet. You can enter it on the <a href="/">Mailboxes</a> page.</p></div>`;
+  const none = owner.kind === "global" ? "You have no global context yet." : "This mailbox has no context yet.";
+  let versionsHtml = `<div class="panel pad"><p>${none} You can enter it on the <a href="/">Mailboxes</a> page.</p></div>`;
   if (selected && current) {
     const i = position.get(selected.id)!;
     const previous = versions[i - 1];
@@ -1294,9 +1325,13 @@ ${
   return page(
     "Context history",
     `${messagePanels(app, h.messages ?? [])}
-<div class="rule"><span class="n">Context</span><span>${esc(account.name || account.email)}</span><span class="end">${versions.length} ${versions.length === 1 ? "version" : "versions"}</span></div>
-<div class="title"><div><h1>Context history</h1>
-<p class="lede">${a} instructs Claude to read the current context of <b>${esc(account.email)}</b> before it works in this mailbox. An agent can only propose a change. The context changes only when you accept the proposal. The name of the app comes from the Claude connection that you approved. The agent gives its own name, in quotes, and its reason. ${a} cannot verify them.</p></div>
+<div class="rule"><span class="n">Context</span><span>${owner.kind === "global" ? "Global" : esc(owner.account.name || owner.account.email)}</span><span class="end">${versions.length} ${versions.length === 1 ? "version" : "versions"}</span></div>
+<div class="title"><div><h1>${owner.kind === "global" ? "Global context history" : "Context history"}</h1>
+<p class="lede">${
+      owner.kind === "global"
+        ? `${a} instructs Claude to follow the current global context in every mailbox. Where the context of a mailbox conflicts with it, Claude follows the context of the mailbox.`
+        : `${a} instructs Claude to read the current context of <b>${esc(owner.account.email)}</b> before it works in this mailbox.`
+    } An agent can only propose a change. The context changes only when you accept the proposal. The name of the app comes from the Claude connection that you approved. The agent gives its own name, in quotes, and its reason. ${a} cannot verify them.</p></div>
 <a class="btn secondary" href="/">Back to mailboxes</a></div>
 ${
   h.proposal

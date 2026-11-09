@@ -217,30 +217,14 @@ export async function updateAccountDetails(
   details: AccountDetails,
   editor: string,
 ): Promise<void> {
-  const current = await env.DB.prepare("SELECT context FROM accounts WHERE id = ? AND user_id = ?")
-    .bind(id, userId)
-    .first<{ context: string }>();
-  if (!current) return;
   const p = details.permissions;
-  const context = cleanContext(details.context).slice(0, MAX_CONTEXT_CHARS);
   const now = Date.now();
-  const statements = [
-    env.DB.prepare(
-      `UPDATE accounts SET name = ?, context = ?, allow_send = ?, allow_invite = ?, allow_reply = ?, updated_at = ?
-       WHERE id = ? AND user_id = ?`,
-    ).bind(
-      details.name.slice(0, 100),
-      context,
-      p.sendEmail ? 1 : 0,
-      p.sendInvitations ? 1 : 0,
-      p.replyToInvitations ? 1 : 0,
-      now,
-      id,
-      userId,
-    ),
-  ];
-  if (context !== current.context) statements.push(insertUserVersion(env, id, context, editor, now));
-  await env.DB.batch(statements);
+  const update = env.DB.prepare(
+    `UPDATE accounts SET name = ?, allow_send = ?, allow_invite = ?, allow_reply = ?, updated_at = ?
+     WHERE id = ? AND user_id = ?`,
+  ).bind(details.name.slice(0, 100), p.sendEmail ? 1 : 0, p.sendInvitations ? 1 : 0, p.replyToInvitations ? 1 : 0, now, id, userId);
+  const change = await userChange(env, userId, { kind: "account", accountId: id }, details.context, editor, now);
+  await env.DB.batch([update, ...change]);
 }
 
 export async function setAccountStatus(env: Env, id: string, status: string, detail: string | null): Promise<void> {
@@ -255,7 +239,7 @@ export async function deleteAccount(env: Env, userId: string, id: string): Promi
     .first<Account>();
   if (acct) {
     await env.DB.batch([
-      env.DB.prepare("DELETE FROM context_versions WHERE account_id = ?").bind(id),
+      env.DB.prepare("DELETE FROM context_versions WHERE account_id = ?").bind(versionKey(userId, { kind: "account", accountId: id })),
       env.DB.prepare("DELETE FROM accounts WHERE id = ? AND user_id = ?").bind(id, userId),
     ]);
   }
@@ -264,8 +248,10 @@ export async function deleteAccount(env: Env, userId: string, id: string): Promi
 
 // ---------- context history ----------
 
-// accounts.context always holds the text of the latest accepted version. Only the functions in
-// this section change either of them, and each one changes both in one batch.
+// The live context of a subject always holds the text of the latest accepted version of that
+// subject. The live context of an account is accounts.context, and the live global context is
+// users.context. Only the functions in this section change the live context or the versions, and
+// each one changes both in one batch.
 
 /** The longest context that Mailroom stores, in characters. */
 export const MAX_CONTEXT_CHARS = 8000;
@@ -273,14 +259,22 @@ export const MAX_CONTEXT_CHARS = 8000;
 /** Returns a context with LF line breaks only. Browsers send the line breaks of a text box as CRLF. */
 const cleanContext = (text: string) => text.replace(/\r\n?/g, "\n");
 
+/**
+ * The owner of a set of context notes: the global context of a user, which applies to every account
+ * of the user, or the context of one account. Each subject has its own live context, history and
+ * proposal.
+ */
+export type ContextSubject = { kind: "global" } | { kind: "account"; accountId: string };
+
+/** The global context of the user. */
+export const GLOBAL_CONTEXT = { kind: "global" } as const satisfies ContextSubject;
 
 /**
- * A version of the context notes of an account, or a change to them that an agent proposed and
+ * A version of the context notes of a subject, or a change to them that an agent proposed and
  * that waits for a decision. Mailroom keeps only accepted versions in the history.
  */
 export interface ContextVersion {
   id: number;
-  account_id: string;
   context: string;
   /** An agent's change is `proposed` until the user accepts it. A user's change is `accepted` when it is saved. */
   status: "proposed" | "accepted";
@@ -319,7 +313,7 @@ export interface ContextAgent {
   label: string | null;
 }
 
-/** The state of the context history of one account. */
+/** The state of the context history of one subject. */
 export interface ContextSummary {
   /** The current version, or null when the context was never set. */
   latest: ContextVersion | null;
@@ -329,18 +323,58 @@ export interface ContextSummary {
   hasProposal: boolean;
 }
 
+/** The context history state of all the subjects of a user. */
+export interface ContextSummaries {
+  /** The live global context, and its history state. The state is null when the global context has no history. */
+  global: { context: string; summary: ContextSummary | null };
+  /** The history state of each account, by account ID. An account without history has no entry. */
+  accounts: Map<string, ContextSummary>;
+}
+
+/** The context notes of one subject, with their history. */
+export interface ContextHistory {
+  /** The text of the live context. */
+  live: string;
+  /** The accepted versions, oldest first. The text of the last version is the live context. */
+  versions: ContextVersion[];
+  /** The proposal that waits for a decision, or null. A subject has at most one proposal. */
+  proposal: ContextVersion | null;
+}
+
+// context_versions.account_id holds the account ID for the context of an account, and "global:" and
+// the user ID for the global context. Account IDs never contain ":".
+const versionKey = (userId: string, s: ContextSubject) => (s.kind === "global" ? `global:${userId}` : s.accountId);
+
+/** Returns a statement that reads the live context of a subject. It reads no row when the subject does not belong to the user. */
+const selectLive = (env: Env, userId: string, s: ContextSubject) =>
+  s.kind === "global"
+    ? env.DB.prepare("SELECT context FROM users WHERE id = ?").bind(userId)
+    : env.DB.prepare("SELECT context FROM accounts WHERE id = ? AND user_id = ?").bind(s.accountId, userId);
+
+const setLiveContext = (env: Env, userId: string, s: ContextSubject, context: string, now: number) =>
+  s.kind === "global"
+    ? env.DB.prepare("UPDATE users SET context = ? WHERE id = ?").bind(context, userId)
+    : env.DB.prepare("UPDATE accounts SET context = ?, updated_at = ? WHERE id = ? AND user_id = ?").bind(
+        context,
+        now,
+        s.accountId,
+        userId,
+      );
+
+const firstRow = <T>(result: D1Result) => result.results[0] as T | undefined;
+
 const LATEST_ACCEPTED_ID =
   "(SELECT id FROM context_versions WHERE account_id = ? AND status = 'accepted' ORDER BY decided_at DESC, id DESC LIMIT 1)";
 
 /** The earlier version that a version by the user comes from, when it is not a plain edit. */
 type UserVersionSource = { restoredFrom: number } | { editedFrom: number };
 
-function insertUserVersion(env: Env, accountId: string, context: string, editor: string, now: number, source?: UserVersionSource) {
+function insertUserVersion(env: Env, key: string, context: string, editor: string, now: number, source?: UserVersionSource) {
   return env.DB.prepare(
     `INSERT INTO context_versions (account_id, context, status, author_kind, author, restored_from, edited_from, created_at, decided_at, decided_by)
      VALUES (?, ?, 'accepted', 'user', ?, ?, ?, ?, ?, ?)`,
   ).bind(
-    accountId,
+    key,
     context,
     editor,
     source && "restoredFrom" in source ? source.restoredFrom : null,
@@ -351,103 +385,128 @@ function insertUserVersion(env: Env, accountId: string, context: string, editor:
   );
 }
 
-const setAccountContext = (env: Env, userId: string, accountId: string, context: string, now: number) =>
-  env.DB.prepare("UPDATE accounts SET context = ?, updated_at = ? WHERE id = ? AND user_id = ?").bind(
-    context,
-    now,
-    accountId,
-    userId,
-  );
+/**
+ * Returns the statements that make `text` the live context of a subject, as a change by `editor`, the
+ * address of the signed-in user. Returns no statements when the text is the same as the live context,
+ * or when the subject does not belong to the user.
+ */
+async function userChange(
+  env: Env,
+  userId: string,
+  subject: ContextSubject,
+  text: string,
+  editor: string,
+  now: number,
+): Promise<D1PreparedStatement[]> {
+  const live = await liveContext(env, userId, subject);
+  const context = cleanContext(text).slice(0, MAX_CONTEXT_CHARS);
+  if (live === null || context === live) return [];
+  return [setLiveContext(env, userId, subject, context, now), insertUserVersion(env, versionKey(userId, subject), context, editor, now)];
+}
 
-/** Returns the context history state of each account of the user, by account ID. An account without history has no entry. */
-export async function contextSummaries(env: Env, userId: string): Promise<Map<string, ContextSummary>> {
-  const [counts, latest] = await env.DB.batch([
+/** Returns the text of the live context of a subject, or null when the subject does not belong to the user. */
+export async function liveContext(env: Env, userId: string, subject: ContextSubject): Promise<string | null> {
+  return (await selectLive(env, userId, subject).first<{ context: string }>())?.context ?? null;
+}
+
+/** Saves the global context of a user. When the text changes, the history gets a new version by `editor`, the address of the signed-in user. */
+export async function saveGlobalContext(env: Env, userId: string, text: string, editor: string): Promise<void> {
+  const statements = await userChange(env, userId, GLOBAL_CONTEXT, text, editor, Date.now());
+  if (statements.length) await env.DB.batch(statements);
+}
+
+/** Returns the live global context of a user and the context history state of the global context and of each account. */
+export async function contextSummaries(env: Env, userId: string): Promise<ContextSummaries> {
+  const globalKey = versionKey(userId, GLOBAL_CONTEXT);
+  const owned = "(cv.account_id IN (SELECT id FROM accounts WHERE user_id = ?) OR cv.account_id = ?)";
+  const [live, counts, latest] = await env.DB.batch([
+    selectLive(env, userId, GLOBAL_CONTEXT),
     env.DB.prepare(
-      `SELECT cv.account_id, SUM(cv.status = 'accepted') AS versions, SUM(cv.status = 'proposed') AS proposals
-       FROM context_versions cv JOIN accounts a ON a.id = cv.account_id WHERE a.user_id = ? GROUP BY cv.account_id`,
-    ).bind(userId),
+      `SELECT cv.account_id AS key, SUM(cv.status = 'accepted') AS versions, SUM(cv.status = 'proposed') AS proposals
+       FROM context_versions cv WHERE ${owned} GROUP BY cv.account_id`,
+    ).bind(userId, globalKey),
     env.DB.prepare(
-      `SELECT cv.* FROM context_versions cv JOIN accounts a ON a.id = cv.account_id
-       WHERE a.user_id = ? AND cv.id = (SELECT id FROM context_versions x WHERE x.account_id = cv.account_id
+      `SELECT cv.* FROM context_versions cv
+       WHERE ${owned} AND cv.id = (SELECT id FROM context_versions x WHERE x.account_id = cv.account_id
          AND x.status = 'accepted' ORDER BY x.decided_at DESC, x.id DESC LIMIT 1)`,
-    ).bind(userId),
+    ).bind(userId, globalKey),
   ]);
-  const latestByAccount = new Map((latest.results as unknown as ContextVersion[]).map((v) => [v.account_id, v]));
-  const out = new Map<string, ContextSummary>();
-  for (const row of counts.results as { account_id: string; versions: number; proposals: number }[]) {
-    out.set(row.account_id, {
-      latest: latestByAccount.get(row.account_id) ?? null,
-      versions: row.versions,
-      hasProposal: row.proposals > 0,
-    });
+  const latestByKey = new Map(
+    (latest.results as unknown as (ContextVersion & { account_id: string })[]).map((v) => [v.account_id, v]),
+  );
+  const out: ContextSummaries = {
+    global: { context: firstRow<{ context: string }>(live)?.context ?? "", summary: null },
+    accounts: new Map(),
+  };
+  for (const row of counts.results as { key: string; versions: number; proposals: number }[]) {
+    const summary = { latest: latestByKey.get(row.key) ?? null, versions: row.versions, hasProposal: row.proposals > 0 };
+    if (row.key === globalKey) out.global.summary = summary;
+    else out.accounts.set(row.key, summary);
   }
   return out;
 }
 
-/**
- * Returns the accepted versions of the context of an account, oldest first, and the proposal that
- * waits for a decision, or null. An account has at most one proposal. The result is empty when the
- * account does not belong to the user.
- */
-export async function contextHistory(
-  env: Env,
-  userId: string,
-  accountId: string,
-): Promise<{ versions: ContextVersion[]; proposal: ContextVersion | null }> {
-  const { results } = await env.DB.prepare(
-    `SELECT cv.* FROM context_versions cv JOIN accounts a ON a.id = cv.account_id
-     WHERE a.user_id = ? AND cv.account_id = ? AND cv.status IN ('accepted', 'proposed')
-     ORDER BY COALESCE(cv.decided_at, cv.created_at), cv.id`,
-  )
-    .bind(userId, accountId)
-    .all<ContextVersion>();
+/** Returns the live context of a subject and its history, or null when the subject does not belong to the user. */
+export async function contextHistory(env: Env, userId: string, subject: ContextSubject): Promise<ContextHistory | null> {
+  const [live, rows] = await env.DB.batch([
+    selectLive(env, userId, subject),
+    env.DB.prepare(
+      `SELECT * FROM context_versions WHERE account_id = ? AND status IN ('accepted', 'proposed')
+       ORDER BY COALESCE(decided_at, created_at), id`,
+    ).bind(versionKey(userId, subject)),
+  ]);
+  const current = firstRow<{ context: string }>(live);
+  if (!current) return null;
+  const results = rows.results as unknown as ContextVersion[];
   return {
+    live: current.context,
     versions: results.filter((v) => v.status === "accepted"),
     proposal: results.find((v) => v.status === "proposed") ?? null,
   };
 }
 
 /**
- * Saves a change to the context of an account that an agent proposes. The context does not change
- * until the user accepts the proposal. An account has at most one proposal: give the ID of the
+ * Saves a change to the context of a subject that an agent proposes. The context does not change
+ * until the user accepts the proposal. A subject has at most one proposal: give the ID of the
  * proposal that waits as `replaces`, and Mailroom deletes it in the same batch. Returns the ID of the
  * new proposal, or `conflict` when another proposal waits, for example because another agent replaced
  * `replaces` a moment ago.
- * Precondition: `context` has at most MAX_CONTEXT_CHARS characters.
+ * Precondition: the subject belongs to the user, and `context` has at most MAX_CONTEXT_CHARS characters.
  */
 export async function proposeContext(
   env: Env,
-  accountId: string,
+  userId: string,
+  subject: ContextSubject,
   change: { context: string; reason: string; agent: ContextAgent; replaces?: number },
 ): Promise<number | "conflict"> {
+  const key = versionKey(userId, subject);
   const insert = env.DB.prepare(
     `INSERT INTO context_versions (account_id, context, status, author_kind, author, client_id, agent_label, reason, base_id, created_at)
      VALUES (?, ?, 'proposed', 'agent', ?, ?, ?, ?, ${LATEST_ACCEPTED_ID}, ?)`,
-  )
-    .bind(
-      accountId,
-      cleanContext(change.context),
-      change.agent.clientName,
-      change.agent.clientId,
-      change.agent.label,
-      change.reason,
-      accountId,
-      Date.now(),
-    );
+  ).bind(
+    key,
+    cleanContext(change.context),
+    change.agent.clientName,
+    change.agent.clientId,
+    change.agent.label,
+    change.reason,
+    key,
+    Date.now(),
+  );
   const remove =
     change.replaces === undefined
       ? []
       : [
           env.DB.prepare("DELETE FROM context_versions WHERE id = ? AND account_id = ? AND status = 'proposed'").bind(
             change.replaces,
-            accountId,
+            key,
           ),
         ];
   try {
     const results = await env.DB.batch([...remove, insert]);
     return results[results.length - 1].meta.last_row_id;
   } catch (e) {
-    // The unique index context_versions_one_proposal allows one waiting proposal for each account.
+    // The unique index context_versions_one_proposal allows one waiting proposal for each subject.
     if (e instanceof Error && e.message.includes("UNIQUE constraint failed")) return "conflict";
     throw e;
   }
@@ -464,17 +523,20 @@ export async function proposeContext(
 export async function decideProposal(
   env: Env,
   userId: string,
-  accountId: string,
+  subject: ContextSubject,
   proposalId: number,
   decision: { accept: boolean; editor: string; text?: string },
 ): Promise<"accepted" | "edited" | "rejected" | "not_found"> {
-  const proposal = await env.DB.prepare(
-    `SELECT cv.context FROM context_versions cv JOIN accounts a ON a.id = cv.account_id
-     WHERE a.user_id = ? AND cv.account_id = ? AND cv.id = ? AND cv.status = 'proposed'`,
-  )
-    .bind(userId, accountId, proposalId)
-    .first<{ context: string }>();
-  if (!proposal) return "not_found";
+  const key = versionKey(userId, subject);
+  const [live, found] = await env.DB.batch([
+    selectLive(env, userId, subject),
+    env.DB.prepare("SELECT context FROM context_versions WHERE account_id = ? AND id = ? AND status = 'proposed'").bind(
+      key,
+      proposalId,
+    ),
+  ]);
+  const proposal = firstRow<{ context: string }>(found);
+  if (!firstRow(live) || !proposal) return "not_found";
   if (!decision.accept) {
     await env.DB.prepare("DELETE FROM context_versions WHERE id = ? AND status = 'proposed'").bind(proposalId).run();
     return "rejected";
@@ -485,14 +547,14 @@ export async function decideProposal(
   ).bind(now, decision.editor, proposalId);
   const edited = decision.text === undefined ? undefined : cleanContext(decision.text);
   if (edited === undefined || edited === proposal.context) {
-    await env.DB.batch([accept, setAccountContext(env, userId, accountId, proposal.context, now)]);
+    await env.DB.batch([accept, setLiveContext(env, userId, subject, proposal.context, now)]);
     return "accepted";
   }
   // The edited version has a larger ID, so it follows the proposal in the history.
   await env.DB.batch([
     accept,
-    insertUserVersion(env, accountId, edited, decision.editor, now, { editedFrom: proposalId }),
-    setAccountContext(env, userId, accountId, edited, now),
+    insertUserVersion(env, key, edited, decision.editor, now, { editedFrom: proposalId }),
+    setLiveContext(env, userId, subject, edited, now),
   ]);
   return "edited";
 }
@@ -505,22 +567,26 @@ export async function decideProposal(
 export async function restoreContextVersion(
   env: Env,
   userId: string,
-  accountId: string,
+  subject: ContextSubject,
   versionId: number,
   editor: string,
 ): Promise<"restored" | "unchanged" | "not_found"> {
-  const version = await env.DB.prepare(
-    `SELECT cv.context, a.context AS current FROM context_versions cv JOIN accounts a ON a.id = cv.account_id
-     WHERE a.user_id = ? AND cv.account_id = ? AND cv.id = ? AND cv.status = 'accepted'`,
-  )
-    .bind(userId, accountId, versionId)
-    .first<{ context: string; current: string }>();
-  if (!version) return "not_found";
-  if (version.context === version.current) return "unchanged";
+  const key = versionKey(userId, subject);
+  const [live, found] = await env.DB.batch([
+    selectLive(env, userId, subject),
+    env.DB.prepare("SELECT context FROM context_versions WHERE account_id = ? AND id = ? AND status = 'accepted'").bind(
+      key,
+      versionId,
+    ),
+  ]);
+  const current = firstRow<{ context: string }>(live);
+  const version = firstRow<{ context: string }>(found);
+  if (!current || !version) return "not_found";
+  if (version.context === current.context) return "unchanged";
   const now = Date.now();
   await env.DB.batch([
-    insertUserVersion(env, accountId, version.context, editor, now, { restoredFrom: versionId }),
-    setAccountContext(env, userId, accountId, version.context, now),
+    insertUserVersion(env, key, version.context, editor, now, { restoredFrom: versionId }),
+    setLiveContext(env, userId, subject, version.context, now),
   ]);
   return "restored";
 }
