@@ -58,12 +58,30 @@ You do not need app verification from Google. When you link a mailbox, Google sh
 
 ### 4. Connect Claude
 
-1. In Claude, open **Settings → Connectors**.
-2. Click **Add custom connector**.
+On a Free, Pro or Max plan, do these steps:
+
+1. In Claude, open **Customize → Connectors**.
+2. Click **+ Add**, then click **Add custom connector**.
 3. Enter `Mailroom` as the name and `https://<your-worker>/mcp` as the URL.
-4. Click **Connect**.
-5. Sign in with Google when the Mailroom sign-in page opens.
-6. Click **Allow** on the Mailroom consent page.
+4. Click **Continue** until Claude shows the **Authentication** settings.
+5. Under **Authentication**, choose **Sign in now**. Then click **Add**.
+6. Click **Connect**.
+7. When the Mailroom sign-in page opens, sign in with Google.
+8. Click **Allow** on the Mailroom consent page.
+
+On a Team or Enterprise plan, an Owner adds the connector once for the organisation:
+
+1. In Claude, open **Organization settings → Connectors**.
+2. Click **Add**, point to **Custom**, then select **Web**.
+3. Do steps 3 to 5 of the list above.
+
+Then each person in the organisation connects:
+
+1. In Claude, open **Customize → Connectors**.
+2. Find Mailroom in the list, then click **Connect**.
+3. Do steps 7 and 8 of the first list.
+
+To enable or disable Mailroom in a chat, click **+** at the lower left of the chat, then click **Connectors**.
 
 Claude then has these tools:
 

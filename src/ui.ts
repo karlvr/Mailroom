@@ -305,13 +305,16 @@ ${accounts.map(acct).join("") || `<div class="card"><p>You have no linked mailbo
 <div class="row"><a class="btn" href="/accounts/link">+ Link a mailbox</a></div>
 
 <div class="card" style="margin-top:28px"><h2>Connect Claude</h2>
-<ol><li>In Claude, open <b>Settings → Connectors</b>.</li>
-<li>Click <b>Add custom connector</b>.</li>
+<ol><li>In Claude, open <b>Customize → Connectors</b>.</li>
+<li>Click <b>+ Add</b>, then click <b>Add custom connector</b>.</li>
 <li>Enter <code>${esc(app)}</code> as the name and this URL as the URL:</li></ol>
 ${copyBox(mcpUrl)}
-<ol start="4"><li>Click <b>Connect</b>.</li>
+<ol start="4"><li>Click <b>Continue</b> until Claude shows the <b>Authentication</b> settings.</li>
+<li>Under <b>Authentication</b>, choose <b>Sign in now</b>. Then click <b>Add</b>.</li>
+<li>Click <b>Connect</b>.</li>
 <li>If the ${esc(app)} sign-in page opens, sign in with <b>${esc(who)}</b>.</li>
 <li>Click <b>Allow</b> on the ${esc(app)} consent page.</li></ol>
+<p class="muted">On a Team or Enterprise plan, an Owner adds the connector once in <b>Organization settings → Connectors</b>, with <b>Add → Custom → Web</b>. Then each person opens <b>Customize → Connectors</b> and clicks <b>Connect</b> next to ${esc(app)}.</p>
 <p class="muted">Claude then has tools for every mailbox above. With these tools, Claude can list your mailboxes, search, read threads, apply labels, create drafts and trash threads. Claude can send drafts only from a mailbox where you select <b>Allow sending</b>.</p></div>`,
     { app, who },
   );
