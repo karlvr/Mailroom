@@ -222,7 +222,7 @@ export async function updateAccountDetails(
     .first<{ context: string }>();
   if (!current) return;
   const p = details.permissions;
-  const context = details.context.slice(0, MAX_CONTEXT_CHARS);
+  const context = cleanContext(details.context).slice(0, MAX_CONTEXT_CHARS);
   const now = Date.now();
   const statements = [
     env.DB.prepare(
@@ -270,6 +270,9 @@ export async function deleteAccount(env: Env, userId: string, id: string): Promi
 /** The longest context that Mailroom stores, in characters. */
 export const MAX_CONTEXT_CHARS = 8000;
 
+/** Returns a context with LF line breaks only. Browsers send the line breaks of a text box as CRLF. */
+const cleanContext = (text: string) => text.replace(/\r\n?/g, "\n");
+
 /** The largest number of proposals that can wait for a decision on one account. */
 export const MAX_PENDING_PROPOSALS = 10;
 
@@ -296,6 +299,12 @@ export interface ContextVersion {
   base_id: number | null;
   /** The version that the user restored to make this version. */
   restored_from: number | null;
+  /**
+   * The proposal that the user edited to make this version. The proposal is the accepted version just
+   * before this one, and its text was never in effect.
+   */
+  edited_from: number | null;
+
   created_at: number;
   /** When the change became current. Null for a proposal. */
   decided_at: number | null;
@@ -326,11 +335,23 @@ export interface ContextSummary {
 const LATEST_ACCEPTED_ID =
   "(SELECT id FROM context_versions WHERE account_id = ? AND status = 'accepted' ORDER BY decided_at DESC, id DESC LIMIT 1)";
 
-function insertUserVersion(env: Env, accountId: string, context: string, editor: string, now: number, restoredFrom?: number) {
+/** The earlier version that a version by the user comes from, when it is not a plain edit. */
+type UserVersionSource = { restoredFrom: number } | { editedFrom: number };
+
+function insertUserVersion(env: Env, accountId: string, context: string, editor: string, now: number, source?: UserVersionSource) {
   return env.DB.prepare(
-    `INSERT INTO context_versions (account_id, context, status, author_kind, author, restored_from, created_at, decided_at, decided_by)
-     VALUES (?, ?, 'accepted', 'user', ?, ?, ?, ?, ?)`,
-  ).bind(accountId, context, editor, restoredFrom ?? null, now, now, editor);
+    `INSERT INTO context_versions (account_id, context, status, author_kind, author, restored_from, edited_from, created_at, decided_at, decided_by)
+     VALUES (?, ?, 'accepted', 'user', ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    accountId,
+    context,
+    editor,
+    source && "restoredFrom" in source ? source.restoredFrom : null,
+    source && "editedFrom" in source ? source.editedFrom : null,
+    now,
+    now,
+    editor,
+  );
 }
 
 const setAccountContext = (env: Env, userId: string, accountId: string, context: string, now: number) =>
@@ -414,7 +435,7 @@ export async function proposeContext(
   )
     .bind(
       accountId,
-      change.context,
+      cleanContext(change.context),
       change.agent.clientName,
       change.agent.clientId,
       change.agent.label,
@@ -427,36 +448,47 @@ export async function proposeContext(
 }
 
 /**
- * Accepts or rejects a proposal. An accepted proposal becomes the current context of the account and
- * a version in the history. Mailroom deletes a rejected proposal.
- * Returns false when the proposal does not exist, does not belong to the user, or already has a decision.
+ * Accepts or rejects a proposal. An accepted proposal becomes a version in the history. When `text`
+ * differs from the proposal, the user edited it: the history gets the proposal and then a version by
+ * the user with `text`, and only `text` becomes the current context. Otherwise the proposal becomes
+ * the current context. Mailroom deletes a rejected proposal.
+ * Precondition: `text` has at most MAX_CONTEXT_CHARS characters.
+ * Returns `not_found` when the proposal does not exist, does not belong to the user, or already has a decision.
  */
 export async function decideProposal(
   env: Env,
   userId: string,
   accountId: string,
   proposalId: number,
-  decision: { accept: boolean; editor: string },
-): Promise<boolean> {
+  decision: { accept: boolean; editor: string; text?: string },
+): Promise<"accepted" | "edited" | "rejected" | "not_found"> {
   const proposal = await env.DB.prepare(
     `SELECT cv.context FROM context_versions cv JOIN accounts a ON a.id = cv.account_id
      WHERE a.user_id = ? AND cv.account_id = ? AND cv.id = ? AND cv.status = 'proposed'`,
   )
     .bind(userId, accountId, proposalId)
     .first<{ context: string }>();
-  if (!proposal) return false;
+  if (!proposal) return "not_found";
   if (!decision.accept) {
     await env.DB.prepare("DELETE FROM context_versions WHERE id = ? AND status = 'proposed'").bind(proposalId).run();
-    return true;
+    return "rejected";
   }
   const now = Date.now();
+  const accept = env.DB.prepare(
+    "UPDATE context_versions SET status = 'accepted', decided_at = ?, decided_by = ? WHERE id = ? AND status = 'proposed'",
+  ).bind(now, decision.editor, proposalId);
+  const edited = decision.text === undefined ? undefined : cleanContext(decision.text);
+  if (edited === undefined || edited === proposal.context) {
+    await env.DB.batch([accept, setAccountContext(env, userId, accountId, proposal.context, now)]);
+    return "accepted";
+  }
+  // The edited version has a larger ID, so it follows the proposal in the history.
   await env.DB.batch([
-    env.DB.prepare(
-      "UPDATE context_versions SET status = 'accepted', decided_at = ?, decided_by = ? WHERE id = ? AND status = 'proposed'",
-    ).bind(now, decision.editor, proposalId),
-    setAccountContext(env, userId, accountId, proposal.context, now),
+    accept,
+    insertUserVersion(env, accountId, edited, decision.editor, now, { editedFrom: proposalId }),
+    setAccountContext(env, userId, accountId, edited, now),
   ]);
-  return true;
+  return "edited";
 }
 
 /**
@@ -481,7 +513,7 @@ export async function restoreContextVersion(
   if (version.context === version.current) return "unchanged";
   const now = Date.now();
   await env.DB.batch([
-    insertUserVersion(env, accountId, version.context, editor, now, versionId),
+    insertUserVersion(env, accountId, version.context, editor, now, { restoredFrom: versionId }),
     setAccountContext(env, userId, accountId, version.context, now),
   ]);
   return "restored";

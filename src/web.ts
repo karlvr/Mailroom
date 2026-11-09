@@ -6,7 +6,9 @@ import {
   contextHistory,
   contextSummaries,
   decideProposal,
+  MAX_CONTEXT_CHARS,
   deleteAccount,
+  findAccount,
   getAllowlist,
   getConfig,
   getGoogleConfig,
@@ -30,6 +32,7 @@ import {
   adminLoginPage,
   consentPage,
   contextPage,
+  contextPreview,
   costsPage,
   dashboardPage,
   favicon,
@@ -143,6 +146,8 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
     if (m && method === "POST") return accountPost(req, env, ctx, m[1], !!m[2]);
     const history = path.match(/^\/accounts\/([\w-]+)\/context$/);
     if (history && method === "GET") return contextGet(req, env, app, history[1]);
+    const preview = path.match(/^\/accounts\/([\w-]+)\/context\/preview$/);
+    if (preview && method === "POST") return previewPost(req, env, preview[1]);
     const proposal = path.match(/^\/accounts\/([\w-]+)\/context\/proposals\/(\d+)$/);
     if (proposal && method === "POST") return proposalPost(req, env, app, proposal[1], Number(proposal[2]));
     const restore = path.match(/^\/accounts\/([\w-]+)\/context\/versions\/(\d+)\/restore$/);
@@ -413,11 +418,30 @@ async function proposalPost(req: Request, env: Env, app: string, id: string, pro
   const f = await form(req);
   if (!checkCsrf(f, session.csrf)) return redirect(historyUrl(id, "That form expired. Try again."));
   const accept = f.get("decision") === "accept";
-  const done = await decideProposal(env, session.userId, id, proposalId, { accept, editor: session.email });
-  if (!done) return redirect(historyUrl(id, "That proposal does not exist, or it already has a decision."));
-  return redirect(
-    historyUrl(id, accept ? `${app} accepted the proposal. It is now the current context.` : `${app} rejected and deleted the proposal.`),
-  );
+  // The review form sends the text of the proposal, which the user can edit.
+  const text = f.has("context") ? String(f.get("context")) : undefined;
+  if (text !== undefined && text.replace(/\r\n/g, "\n").length > MAX_CONTEXT_CHARS) {
+    return redirect(historyUrl(id, `The context can have at most ${MAX_CONTEXT_CHARS} characters. ${app} did not save your edits.`));
+  }
+  const result = await decideProposal(env, session.userId, id, proposalId, { accept, editor: session.email, text });
+  const messages = {
+    accepted: `${app} accepted the proposal. It is now the current context.`,
+    edited: `${app} accepted the proposal with your edits. Your edited text is now the current context.`,
+    rejected: `${app} rejected and deleted the proposal.`,
+    not_found: "That proposal does not exist, or it already has a decision.",
+  };
+  return redirect(historyUrl(id, messages[result]));
+}
+
+/** Returns the diff of the current context of a mailbox and the posted text, as an HTML fragment. */
+async function previewPost(req: Request, env: Env, id: string) {
+  const session = await getUserSession(env, req);
+  if (!session) return new Response(null, { status: 401 });
+  const f = await form(req);
+  if (!checkCsrf(f, session.csrf)) return new Response(null, { status: 403 });
+  const account = await findAccount(env, session.userId, id);
+  if (!account) return new Response(null, { status: 404 });
+  return contextPreview(account.context, String(f.get("context") ?? ""));
 }
 
 async function restorePost(req: Request, env: Env, app: string, id: string, versionId: number) {

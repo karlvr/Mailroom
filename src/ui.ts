@@ -3,6 +3,7 @@ import {
   type AccountPermissions,
   type ContextSummary,
   type ContextVersion,
+  MAX_CONTEXT_CHARS,
   PERMISSION_LABELS,
   accountPermissions,
   grantedScopes,
@@ -287,6 +288,13 @@ input[type=checkbox]{flex:none;width:18px;height:18px;margin:0;accent-color:var(
 .vlist .m{font:12px var(--mono);color:var(--muted)}
 .proposal+.proposal{margin-top:24px}
 .proposal .actions{justify-content:flex-start}
+[hidden]{display:none!important}
+.seg button{min-height:0;padding:6px 12px;border:0;border-radius:0;background:none;color:var(--muted);font:500 12px var(--mono);cursor:pointer}
+.seg button+button{border-left:1px solid var(--strong)}
+.seg button:hover{color:var(--ink)}
+.seg button[aria-selected=true]{background:var(--btn);color:var(--btn-ink)}
+.edit{padding:16px 20px;border-top:1px solid var(--line)}
+.edit textarea{min-height:240px;font:14px/1.65 var(--sans)}
 .refs{margin:16px 0 0;padding:0;list-style:none;border-top:1px solid var(--line)}
 .refs li{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:2px 16px;margin:0;padding:10px 0;border-bottom:1px solid var(--line)}
 .refs a{font-weight:500}
@@ -844,14 +852,78 @@ function clientHost(clientId: string | null): string | null {
   }
 }
 
+/** What the history knows about the versions around a version, for its description. */
+interface ChangeRefs {
+  /** Returns the number of a version in the history, or undefined when the history is not at hand. */
+  number?: (id: number) => number | undefined;
+  /** True when the user edited this proposal before it became current. */
+  acceptedWithEdits?: boolean;
+}
+
 /** Returns who made a version current and when, as HTML, for example "Proposed by Claude, accepted by you on 10 Nov 2026". */
-function changeHtml(v: ContextVersion, viewer: string, restoredNumber?: number): string {
+function changeHtml(v: ContextVersion, viewer: string, refs: ChangeRefs = {}): string {
   const at = when(v.decided_at ?? v.created_at);
   const decider = v.decided_by && v.decided_by.toLowerCase() === viewer.toLowerCase() ? "you" : esc(v.decided_by ?? "");
-  if (v.author_kind === "agent") return `Proposed by ${authorHtml(v, viewer)}, accepted by ${decider} on ${at}`;
-  if (v.restored_from) return `Restored ${restoredNumber ? `from version ${restoredNumber} ` : ""}by ${authorHtml(v, viewer)} on ${at}`;
+  const versionOf = (id: number) => {
+    const n = refs.number?.(id);
+    return n ? `version ${n}` : undefined;
+  };
+  if (v.author_kind === "agent") {
+    return `Proposed by ${authorHtml(v, viewer)}, accepted ${refs.acceptedWithEdits ? "with edits " : ""}by ${decider} on ${at}`;
+  }
+  if (v.restored_from) {
+    const from = versionOf(v.restored_from);
+    return `Restored ${from ? `from ${from} ` : ""}by ${authorHtml(v, viewer)} on ${at}`;
+  }
+  if (v.edited_from) {
+    const from = versionOf(v.edited_from);
+    return `Edited by ${authorHtml(v, viewer)} from ${from ? `the proposal in ${from}` : "a proposal"} on ${at}`;
+  }
   return `Changed by ${authorHtml(v, viewer)} on ${at}`;
 }
+
+const textHtml = (t: string) => (t ? esc(t) : `<span class="empty-text">The context is empty.</span>`);
+
+/** Returns the changes from `before` to `after` as HTML, or the text when the two are the same. */
+function contextDiffHtml(before: string, after: string): string {
+  if (before === after) return textHtml(after);
+  return diffWords(before, after)
+    .map((r) => (r.op === "same" ? esc(r.text) : r.op === "removed" ? `<del>${esc(r.text)}</del>` : `<ins>${esc(r.text)}</ins>`))
+    .join("");
+}
+
+/** Returns the changes from the current context to `text` as an HTML fragment, for the Diff tab of a proposal. */
+export function contextPreview(current: string, text: string): Response {
+  return new Response(contextDiffHtml(current, text.replace(/\r\n?/g, "\n")), {
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" },
+  });
+}
+
+/**
+ * The script of the proposals on the history page. It shows the Diff and Edit tabs of each proposal,
+ * gets a new diff from the preview URL after the user edits the text, and changes Accept to Accept
+ * with edits while the text differs from the agent's text. Without the script, the page shows the
+ * diff and the text box together.
+ */
+const PROPOSAL_JS = `document.querySelectorAll('[data-proposal]').forEach(p=>{
+const tabs=p.querySelector('[role=tablist]'),ta=p.querySelector('textarea'),diff=p.querySelector('[data-pane=diff]'),edit=p.querySelector('[data-pane=edit]'),accept=p.querySelector('[data-accept]'),revert=p.querySelector('[data-revert]'),cap=p.querySelector('[data-caption]'),form=p.querySelector('form');
+const original=ta.dataset.original,edited=()=>ta.value!==original;let shown=original;
+const sync=()=>{accept.textContent=edited()?'Accept with edits':'Accept';revert.hidden=!edited()};
+const show=async t=>{
+tabs.querySelectorAll('[role=tab]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===t)));
+edit.hidden=t!=='edit';diff.hidden=t!=='diff';
+cap.textContent=t==='edit'?'Edit the text before you accept it':edited()?'Changes from the current context, with your edits':'Changes from the current context';
+if(t==='edit'){ta.focus();return}
+if(ta.value===shown)return;
+const v=ta.value,r=await fetch(p.dataset.preview,{method:'POST',body:new URLSearchParams({csrf:form.elements.csrf.value,context:v})});
+if(r.ok){diff.innerHTML=await r.text();shown=v}
+};
+tabs.hidden=false;
+tabs.addEventListener('click',e=>{const b=e.target.closest('[role=tab]');if(b)show(b.dataset.tab)});
+ta.addEventListener('input',sync);
+revert.addEventListener('click',()=>{ta.value=original;sync();show('diff')});
+show('diff');
+})`;
 
 /** Returns the line under the context of a mailbox: when the context changed, by whom, and a link to its history. */
 function contextMeta(m: Account, summary: ContextSummary | undefined, viewer: string): string {
@@ -1075,24 +1147,31 @@ export function contextPage(app: string, who: string, account: Account, h: Conte
   const number = (id: number) => (position.get(id) ?? -1) + 1;
   const csrf = `<input type="hidden" name="csrf" value="${esc(h.csrf)}">`;
 
-  const textHtml = (t: string) => (t ? esc(t) : `<span class="empty-text">The context is empty.</span>`);
-  const diffHtml = (before: string, after: string) =>
-    diffWords(before, after)
-      .map((r) => (r.op === "same" ? esc(r.text) : r.op === "removed" ? `<del>${esc(r.text)}</del>` : `<ins>${esc(r.text)}</ins>`))
-      .join("");
+  // A proposal that the user edited is followed by the version with the edits.
+  const editedProposals = new Set(versions.map((v) => v.edited_from).filter((id): id is number => id !== null));
+  const refs = (v: ContextVersion): ChangeRefs => ({
+    number: (id) => number(id) || undefined,
+    acceptedWithEdits: editedProposals.has(v.id),
+  });
   const reasonHtml = (v: ContextVersion) => (v.reason ? `<p class="note"><b>Reason that the agent gave:</b> ${esc(v.reason)}</p>` : "");
 
   const proposalHtml = (p: ContextVersion) => {
     const stale = (current?.id ?? null) !== p.base_id;
-    return `<div class="panel raised ticks accent proposal">
+    return `<div class="panel raised ticks accent proposal" data-proposal data-preview="${base}/preview">
 <div class="pad"><div class="label hot">Proposal</div>
 <p>${authorHtml(p, who)} proposed this change on ${when(p.created_at)}.</p>
 ${reasonHtml(p)}
 ${stale ? warning("The context changed after the agent made this proposal. The changes below compare the proposal with the current context. If you accept the proposal, it replaces the current context.") : ""}
 </div>
-<div class="cap"><span class="label">Changes from the current context</span></div>
-<div class="diff">${current?.context === p.context ? textHtml(p.context) : diffHtml(current?.context ?? "", p.context)}</div>
-<form method="post" action="${base}/proposals/${p.id}" class="actions">${csrf}<div class="row"><button name="decision" value="accept">Accept</button><button class="secondary" name="decision" value="reject">Reject</button></div></form>
+<div class="cap"><span class="label" data-caption>Changes from the current context</span><span class="seg" role="tablist" aria-label="View" hidden><button type="button" role="tab" data-tab="diff" aria-selected="true">Diff</button><button type="button" role="tab" data-tab="edit" aria-selected="false">Edit</button></span></div>
+<div class="diff" data-pane="diff">${contextDiffHtml(current?.context ?? "", p.context)}</div>
+<form method="post" action="${base}/proposals/${p.id}">${csrf}
+<div class="edit" data-pane="edit"><label for="proposal-${p.id}">Text of the proposal <span class="hint">You can edit it before you accept it</span></label>
+<textarea id="proposal-${p.id}" name="context" maxlength="${MAX_CONTEXT_CHARS}" data-original="${esc(p.context)}">
+${esc(p.context)}</textarea>
+<p class="help">If you accept with edits, the history keeps the agent's text as one version and your text as the next version. Only your text becomes the current context.</p></div>
+<div class="actions"><div class="row"><button name="decision" value="accept" data-accept>Accept</button><button type="button" class="secondary" data-revert hidden>Revert to the agent's text</button><button class="secondary" name="decision" value="reject">Reject</button></div></div>
+</form>
 </div>`;
   };
 
@@ -1126,7 +1205,7 @@ ${stale ? warning("The context changed after the agent made this proposal. The c
           : mode === "current"
             ? [`Changes from version ${n} to the current version, version ${versions.length}`, selected.context, current.context]
             : [`Text of version ${n}`, selected.context, selected.context];
-    const body = before === after ? textHtml(selected.context) : diffHtml(before, after);
+    const body = contextDiffHtml(before, after);
     const same = mode !== "text" && before === after ? ". The texts are the same." : "";
     const list = [...versions]
       .reverse()
@@ -1134,14 +1213,15 @@ ${stale ? warning("The context changed after the agent made this proposal. The c
         (v) =>
           `<li><a href="${base}?v=${v.id}#versions"${v.id === selected.id ? ` aria-current="page"` : ""}><span class="n">Version ${number(v.id)}${
             v.id === current.id ? ` <span class="pill ok">Current</span>` : ""
-          }</span><span class="m">${changeHtml(v, who, v.restored_from ? number(v.restored_from) || undefined : undefined)}</span></a></li>`,
+          }</span><span class="m">${changeHtml(v, who, refs(v))}</span></a></li>`,
       )
       .join("");
     versionsHtml = `<div class="history"><div class="panel"><ul class="vlist">${list}</ul></div>
 <div class="panel">
 <div class="pad"><div class="label hot">Version ${n}${isCurrent ? " · Current" : ""}</div>
-<p>${changeHtml(selected, who, selected.restored_from ? number(selected.restored_from) || undefined : undefined)}.</p>
-${selected.author_kind === "agent" ? reasonHtml(selected) : ""}</div>
+<p>${changeHtml(selected, who, refs(selected))}.</p>
+${selected.author_kind === "agent" ? reasonHtml(selected) : ""}
+${editedProposals.has(selected.id) ? `<p class="note">This text was never in effect. When you accepted the proposal, your edits in version ${n + 1} replaced it.</p>` : ""}</div>
 <div class="cap"><span class="label">${caption}${same}</span><span class="seg" aria-label="Compare">${seg}</span></div>
 <div class="diff">${body}</div>
 ${
@@ -1167,7 +1247,8 @@ ${h.proposals.map(proposalHtml).join("\n")}</section>`
 }
 <section class="sect" id="versions"><div class="rule"><span class="n">${h.proposals.length ? "02" : "01"}</span><span>Versions</span><span class="end">Newest first</span></div>
 ${versionsHtml}
-</section>`,
+</section>
+${h.proposals.length ? `<script>${PROPOSAL_JS}</script>` : ""}`,
     { app, width: "wide", nav: [{ href: "/", text: "Mailboxes" }], aside: signedIn(who) },
   );
 }

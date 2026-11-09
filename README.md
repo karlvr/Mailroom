@@ -143,6 +143,7 @@ Mailroom instructs Claude to follow the context notes of a mailbox as your instr
 When a mailbox has a proposal, the mailboxes page shows a notice for that mailbox. On the **History** page of the mailbox, you can do these actions:
 
 - See each proposal and its changes from the current context. Then accept or reject it. Mailroom deletes a rejected proposal.
+- Edit a proposal before you accept it. On the **Edit** tab, change the text. **Accept** then becomes **Accept with edits**, and **Revert to the agent's text** undoes your edits. The **Diff** tab shows the changes with your edits. When you accept with edits, the history keeps the agent's text and then your text, and only your text becomes the current context.
 - See each earlier version of the context, with the time and the person or the agent that made it. For a version from an agent, the history also shows the person who accepted it.
 - Compare a version with the previous version, the next version or the current version.
 - Restore an earlier version. The restored text becomes a new version, so the history keeps every step.
