@@ -55,7 +55,7 @@ export function page(title: string, body: string, opts: { app: string; who?: str
     opts.who ? `<div class="who">${esc(opts.who)} · <a href="/logout">Sign out</a></div>` : ""
   }</header>
 ${body}
-<footer>Self-hosted mailbox connector for Claude. Claude sends email only from mailboxes where you allow sending.</footer>
+<footer>${esc(opts.app)} is a self-hosted mailbox connector for Claude. Claude can send email only from a mailbox where you select Allow sending. <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></footer>
 </main><script>${COPY_JS}</script></body></html>`;
   return new Response(html, {
     headers: {
@@ -71,6 +71,16 @@ ${body}
 export const copyBox = (value: string) =>
   `<div class="copy"><span>${esc(value)}</span><button type="button" data-copy="${esc(value)}">Copy</button></div>`;
 
+const section = (title: string, body: string) => `<div class="card"><h2>${title}</h2>${body}</div>`;
+
+/**
+ * Returns the domain to add as an authorized domain in Google Auth Platform for a host name.
+ * Google accepts only a registrable domain, such as `example.com` or `you.workers.dev`. This knows
+ * the `workers.dev` suffix and assumes a one-label public suffix for other hosts.
+ */
+const authorizedDomain = (hostname: string) =>
+  hostname.split(".").slice(hostname.endsWith(".workers.dev") ? -3 : -2).join(".");
+
 export function messagePage(app: string, title: string, message: string, link?: { href: string; text: string }) {
   return page(
     title,
@@ -84,8 +94,8 @@ export function messagePage(app: string, title: string, message: string, link?: 
 export function adminLoginPage(app: string, error?: string) {
   return page(
     "Setup",
-    `<h1>Set up ${esc(app)}</h1>
-<p class="muted">Enter the admin password you chose when you deployed this Worker.</p>
+    `<h1>${esc(app)} setup</h1>
+<p class="muted">Enter the admin password that you chose when you deployed this Worker.</p>
 <div class="card"><form method="post" action="/setup/login">
 ${error ? `<div class="notice">${esc(error)}</div>` : ""}
 <label for="pw">Admin password</label><input id="pw" type="password" name="password" autocomplete="current-password" required autofocus>
@@ -105,40 +115,46 @@ export function setupPage(
   return page(
     "Setup",
     `<h1>Connect to Google</h1>
-<p class="muted">About ten minutes, once. Each link opens the exact Google Cloud screen — keep this page open in another tab.</p>
-${s.saved ? `<div class="notice">Saved. <a href="/">Sign in and link your mailboxes →</a></div>` : ""}
+<p class="muted">You do this setup only once. It takes about 10 minutes. Each link opens the Google Cloud screen for that step in a new tab. Keep this page open.</p>
+${s.saved ? `<div class="notice">${esc(app)} saved the settings. <a href="/">Sign in and link your mailboxes →</a></div>` : ""}
 ${s.error ? `<div class="notice">${esc(s.error)}</div>` : ""}
 ${step(
   1,
   "Create a Google Cloud project",
-  `<p><a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener">Create a project</a> — any name, e.g. <code>${esc(app)}</code>. Make sure it's selected in the project picker at the top before the next steps.</p>`,
+  `<p><a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener">Create a project</a>. You can use any name, for example <code>${esc(app)}</code>. Before you do the next steps, select the project in the project picker at the top of the page.</p>`,
   s.configured,
 )}
 ${step(
   2,
-  "Turn on the Gmail API",
+  "Enable the Gmail API",
   `<p><a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank" rel="noopener">Open the Gmail API</a> and click <b>Enable</b>.</p>`,
   s.configured,
 )}
 ${step(
   3,
-  "Set up the sign-in screen",
+  "Configure the sign-in screen",
   `<ol>
-<li><a href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noopener">Open Google Auth Platform</a> → <b>Get started</b>. App name: <code>${esc(app)}</code>; support email: yours.</li>
-<li>Audience: choose <b>External</b> (this lets mailboxes from any Google account or Workspace link). Contact email: yours. Agree and <b>Create</b>.</li>
-<li>Go to <a href="https://console.cloud.google.com/auth/audience" target="_blank" rel="noopener">Audience</a> and click <b>Publish app</b> → Confirm. <span class="muted">This matters: left in “Testing”, Google expires access every 7 days.</span></li>
+<li><a href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noopener">Open Google Auth Platform</a>, then click <b>Get started</b>. For the app name, enter <code>${esc(app)}</code>. For the support email, enter your address.</li>
+<li>For the audience, choose <b>External</b>. With this setting, you can link mailboxes from any Google account or Workspace. For the contact email, enter your address. Accept the policy, then click <b>Create</b>.</li>
+<li>Open <a href="https://console.cloud.google.com/auth/branding" target="_blank" rel="noopener">Branding</a>. Google does not let you publish the app until you complete these fields. Under <b>App domain</b>, enter these links:
+<div class="muted">Application home page</div>${copyBox(`${origin}/`)}
+<div class="muted">Application privacy policy link</div>${copyBox(`${origin}/privacy`)}
+<div class="muted">Application terms of service link</div>${copyBox(`${origin}/terms`)}
+Under <b>Authorized domains</b>, add this domain:${copyBox(authorizedDomain(new URL(origin).hostname))}
+Do not upload a logo. With a logo, Google must verify the app before you can publish it. Click <b>Save</b>.</li>
+<li>Open <a href="https://console.cloud.google.com/auth/audience" target="_blank" rel="noopener">Audience</a>, then click <b>Publish app</b> and <b>Confirm</b>. <span class="muted">Do not skip this step. If you leave the app in “Testing”, Google expires the access every 7 days.</span></li>
 </ol>
-<p class="muted">You don't need to submit for verification or add scopes. Google will show a “Google hasn't verified this app” screen when you link a mailbox — click <b>Advanced</b> → <b>Go to ${esc(app)}</b>. That's expected for a private app.</p>`,
+<p class="muted">You do not need app verification from Google, and you do not need to add scopes. When you link a mailbox, Google shows the warning “Google hasn't verified this app”. Click <b>Advanced</b>, then click <b>Go to ${esc(app)}</b>. This warning is normal for a private app.</p>`,
   s.configured,
 )}
 ${step(
   4,
   "Create the OAuth client",
   `<ol>
-<li><a href="https://console.cloud.google.com/auth/clients/create" target="_blank" rel="noopener">Create a client</a>. Application type: <b>Web application</b>.</li>
-<li>Under <b>Authorized redirect URIs</b>, add exactly:</li></ol>
+<li><a href="https://console.cloud.google.com/auth/clients/create" target="_blank" rel="noopener">Create a client</a>. For the application type, choose <b>Web application</b>. For the name, enter <code>${esc(app)}</code>.</li>
+<li>Under <b>Authorized redirect URIs</b>, add this URI exactly:</li></ol>
 ${copyBox(redirect)}
-<p>Click <b>Create</b>, then copy the Client ID and Client secret into step 5. <span class="muted">Google only shows the secret once — if you lose it, add a new secret on the client's page.</span></p>`,
+<p>Click <b>Create</b>. Then copy the Client ID and the Client secret into step 5. <span class="muted">Google shows the secret only once. If you lose it, add a new secret on the page of the client.</span></p>`,
   s.configured,
 )}
 ${step(
@@ -147,20 +163,20 @@ ${step(
   `<form method="post" action="/setup">
 <input type="hidden" name="csrf" value="${esc(s.csrf)}">
 <label for="cid">Client ID</label><input id="cid" type="text" name="client_id" value="${esc(s.clientId)}" placeholder="…apps.googleusercontent.com" required>
-<label for="cs">Client secret</label><input id="cs" type="password" name="client_secret" placeholder="${s.configured ? "Saved — leave blank to keep" : "GOCSPX-…"}" ${s.configured ? "" : "required"} autocomplete="off">
+<label for="cs">Client secret</label><input id="cs" type="password" name="client_secret" placeholder="${s.configured ? "Leave this field empty to keep the saved secret" : "GOCSPX-…"}" ${s.configured ? "" : "required"} autocomplete="off">
 <label for="al">Who can use this</label>
 <textarea id="al" name="allowlist" placeholder="you@example.com&#10;@yourcompany.com" required>${esc(s.allowlist)}</textarea>
-<p class="muted">One per line. A full address allows that person; <code>@domain.com</code> allows anyone at that domain. Each person links and sees only their own mailboxes.</p>
+<p class="muted">Enter one entry on each line. A full address gives access to that person. An entry such as <code>@domain.com</code> gives access to every person at that domain. Each person links their own mailboxes and sees only those mailboxes.</p>
 <div class="row"><button>Save</button></div></form>`,
 )}
 ${step(
   6,
-  "For each Google Workspace you use: trust the app",
-  `<p>Workspace admins can block unverified apps. If linking a Workspace mailbox fails with “access blocked”, in that organisation's admin console:</p>
-<ol><li><a href="https://admin.google.com/ac/owl/list?tab=configuredApps" target="_blank" rel="noopener">Open App access control</a> → <b>Configure new app</b>.</li>
+  "Trust the app in each Google Workspace",
+  `<p>A Workspace admin can block unverified apps. If you cannot link a Workspace mailbox because of the error “access blocked”, do these steps in the Admin Console of that organisation:</p>
+<ol><li><a href="https://admin.google.com/ac/owl/list?tab=configuredApps" target="_blank" rel="noopener">Open App access control</a>, then click <b>Configure new app</b>.</li>
 <li>Search for your Client ID${s.clientId ? ":" : "."}</li></ol>
 ${s.clientId ? copyBox(s.clientId) : ""}
-<p>Choose the app, scope it to your organisation, and set access to <b>Trusted</b>. Personal @gmail.com accounts don't need this.</p>`,
+<p>Select the app. Set the scope to your organisation. Set the access to <b>Trusted</b>. A personal @gmail.com account does not need this step.</p>`,
 )}
 <p><a href="/">← Back to ${esc(app)}</a></p>`,
     { app },
@@ -171,13 +187,82 @@ export function landingPage(app: string, configured: boolean) {
   return page(
     "Welcome",
     `<h1>${esc(app)}</h1>
-<p class="muted">Gives Claude access to all your Gmail and Google Workspace mailboxes, each with its own context.</p>
+<p class="muted">${esc(app)} gives Claude access to all your Gmail and Google Workspace mailboxes. Each mailbox has its own context.</p>
 <div class="card">${
       configured
         ? `<p>Sign in with Google to manage your mailboxes.</p><a class="btn" href="/login">Sign in with Google</a>`
-        : `<p>This deployment isn't connected to Google yet.</p><a class="btn" href="/setup">Start setup</a>`
+        : `<p>${esc(app)} is not connected to Google yet.</p><a class="btn" href="/setup">Start setup</a>`
     }</div>
 ${configured ? `<p class="muted"><a href="/setup">Admin setup</a></p>` : ""}`,
+    { app },
+  );
+}
+
+export function privacyPage(app: string, origin: string) {
+  const a = esc(app);
+  return page(
+    "Privacy policy",
+    `<h1>Privacy policy</h1>
+<p class="muted">This policy applies to ${a} at <b>${esc(new URL(origin).host)}</b>. ${a} connects Gmail and Google Workspace mailboxes to Claude. The person or organisation that deployed ${a} operates it. Cloudflare hosts it.</p>
+${section(
+  `Data that ${a} stores`,
+  `<ul><li>Your Google account ID, your email address, and the times of your first and last sign-in.</li>
+<li>For each mailbox that you link: its address, its short name, its context notes, the <b>Allow sending</b> setting and a Google refresh token. ${a} encrypts the token before it stores it.</li>
+<li>Your web session, and a record of each Claude connection that you approve.</li></ul>
+<p>${a} does not store the content of your email.</p>`,
+)}
+${section(
+  `How ${a} uses your Google data`,
+  `<p>${a} uses Google sign-in to get your verified email address. ${a} uses the Gmail API only when Claude calls one of the ${a} tools. ${a} then sends the result to Claude through the connection that you approved.</p>
+<p>The tools can search, read, label, draft and trash email. ${a} sends email only from a mailbox where you select <b>Allow sending</b>.</p>
+<p>${a} does not sell your data. ${a} does not use your data for advertising or to train AI models.</p>
+<p>The use and transfer of information that ${a} receives from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>`,
+)}
+${section(
+  "Who receives your data",
+  `<ul><li><b>Google</b> supplies the sign-in and the Gmail API. Your email stays in Gmail.</li>
+<li><b>Anthropic</b> receives the email data that ${a} sends to Claude. The <a href="https://www.anthropic.com/legal/privacy" target="_blank" rel="noopener">Anthropic privacy policy</a> and your Claude settings apply to that data.</li>
+<li><b>Cloudflare</b> runs ${a} and stores its data. Cloudflare can keep request logs.</li></ul>
+<p>${a} does not send your data to other parties.</p>`,
+)}
+${section(
+  "Remove your data",
+  `<ul><li>To unlink a mailbox, click <b>Remove</b> on the ${a} home page. ${a} deletes the stored token and revokes the Google access of that mailbox.</li>
+<li>To stop the access of Claude, remove the ${a} connector in Claude.</li>
+<li>You can also revoke the access of ${a} on the <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">third-party connections</a> page of your Google account.</li>
+<li>To delete all your data, contact the operator of ${a}.</li></ul>`,
+)}
+${section(
+  "Contact",
+  `<p>For questions about this policy, contact the person or organisation that gave you access to ${a}.</p>`,
+)}`,
+    { app },
+  );
+}
+
+export function termsPage(app: string, origin: string) {
+  const a = esc(app);
+  return page(
+    "Terms of service",
+    `<h1>Terms of service</h1>
+<p class="muted">These terms apply to ${a} at <b>${esc(new URL(origin).host)}</b>. The person or organisation that deployed ${a} operates it. When you use ${a}, you agree to these terms.</p>
+${section(
+  "Access",
+  `<p>Only the people that the operator allows can sign in. Link only the mailboxes that you have permission to use.</p>`,
+)}
+${section(
+  "Your instructions",
+  `<p>Claude uses ${a} when you instruct it. You are responsible for your instructions and for the actions that Claude does because of them. Select <b>Allow sending</b> only for a mailbox where you accept that Claude can send email.</p>
+<p>${a} instructs Claude to treat email content as data, never as instructions. This instruction reduces the risk that an email tricks Claude, but it cannot remove the risk.</p>`,
+)}
+${section(
+  "No warranty",
+  `<p>The operator supplies ${a} “as is”, without warranty of any kind. To the extent that the law permits, the operator is not liable for loss or damage from the use of ${a}. This includes email that Claude sends, labels or trashes.</p>`,
+)}
+${section(
+  "Changes",
+  `<p>The operator can change these terms or stop your access at any time. You can stop the use of ${a} at any time. For information about how ${a} uses your data, read the <a href="/privacy">privacy policy</a>.</p>`,
+)}`,
     { app },
   );
 }
@@ -201,30 +286,33 @@ ${a.name ? `<p class="muted">${esc(a.email)}</p>` : ""}
 ${a.status !== "ok" ? `<div class="notice">${esc(a.status_detail || "Google access stopped working.")} <a href="/accounts/link?hint=${encodeURIComponent(a.email)}">Re-link</a></div>` : ""}
 <form method="post" action="/accounts/${esc(a.id)}">
 <input type="hidden" name="csrf" value="${esc(csrf)}">
-<label>Short name <span class="muted">(how Claude refers to it)</span></label>
-<input type="text" name="name" value="${esc(a.name)}" placeholder="e.g. Support">
+<label>Short name <span class="muted">(Claude uses this name for the mailbox)</span></label>
+<input type="text" name="name" value="${esc(a.name)}" placeholder="For example, Support">
 <label>Context for Claude</label>
 <textarea name="context" placeholder="What this mailbox is for, who matters, what's urgent, what to ignore, how to sign replies…">${esc(a.context)}</textarea>
 <label class="check"><input type="checkbox" name="allow_send" value="1"${a.allow_send === 1 ? " checked" : ""}> Allow sending</label>
-<p class="muted">When this is on, Claude can send email from this mailbox. ${esc(app)} instructs Claude to send only when you tell it to, never because an email asks. This reduces the risk that an email tricks Claude, but it cannot remove the risk.</p>
+<p class="muted">When you select <b>Allow sending</b>, Claude can send email from this mailbox. ${esc(app)} instructs Claude to send email only when you instruct it, never because an email requests it. This instruction reduces the risk that an email tricks Claude, but it cannot remove the risk.</p>
 <div class="row"><button>Save</button>
 <a class="btn secondary" href="/accounts/link?hint=${encodeURIComponent(a.email)}">Re-link</a>
-<button class="danger" formaction="/accounts/${esc(a.id)}/remove" onclick="return confirm('Remove ${esc(a.email)}? This also revokes Google access.')">Remove</button></div>
+<button class="danger" formaction="/accounts/${esc(a.id)}/remove" onclick="return confirm('Remove ${esc(a.email)}? This also revokes its Google access.')">Remove</button></div>
 </form></div>`;
   return page(
     "Mailboxes",
     `${flash ? `<div class="notice">${esc(flash)}</div>` : ""}
 <h1>Your mailboxes</h1>
-<p class="muted">Link each Gmail or Workspace address. Claude reads them only through this Worker. Claude can label, draft and trash, and it can send only from mailboxes where you turn on <b>Allow sending</b>.</p>
-${accounts.map(acct).join("") || `<div class="card"><p>No mailboxes linked yet.</p></div>`}
+<p class="muted">Link each Gmail or Workspace mailbox. Claude can read these mailboxes only through ${esc(app)}. Claude can label, draft and trash email. Claude can send email only from a mailbox where you select <b>Allow sending</b>.</p>
+${accounts.map(acct).join("") || `<div class="card"><p>You have no linked mailboxes.</p></div>`}
 <div class="row"><a class="btn" href="/accounts/link">+ Link a mailbox</a></div>
 
 <div class="card" style="margin-top:28px"><h2>Connect Claude</h2>
-<ol><li>In Claude, open <b>Settings → Connectors</b> and choose <b>Add custom connector</b>.</li>
-<li>Name it <code>${esc(app)}</code> and paste this URL:</li></ol>
+<ol><li>In Claude, open <b>Settings → Connectors</b>.</li>
+<li>Click <b>Add custom connector</b>.</li>
+<li>Enter <code>${esc(app)}</code> as the name and this URL as the URL:</li></ol>
 ${copyBox(mcpUrl)}
-<ol start="3"><li>Click <b>Connect</b> and sign in with <b>${esc(who)}</b> when asked.</li></ol>
-<p class="muted">Claude then has tools to list your mailboxes, search, read threads, apply labels, create drafts and trash threads for every mailbox above. It can send drafts only from mailboxes where you allow sending.</p></div>`,
+<ol start="4"><li>Click <b>Connect</b>.</li>
+<li>If the ${esc(app)} sign-in page opens, sign in with <b>${esc(who)}</b>.</li>
+<li>Click <b>Allow</b> on the ${esc(app)} consent page.</li></ol>
+<p class="muted">Claude then has tools for every mailbox above. With these tools, Claude can list your mailboxes, search, read threads, apply labels, create drafts and trash threads. Claude can send drafts only from a mailbox where you select <b>Allow sending</b>.</p></div>`,
     { app, who },
   );
 }
@@ -240,11 +328,11 @@ export function consentPage(
     "Allow access",
     `<h1>Allow ${esc(d.clientName)} to use your mailboxes?</h1>
 <div class="card">
-<p>${d.clientDomain ? `Published by <b>${esc(d.clientDomain)}</b>.` : "This app registered itself; its name isn't verified."} Access will be sent to <b>${esc(d.redirectHost)}</b>.</p>
-${d.redirectIsLoopback ? `<div class="notice">This sends access to an app on your computer. Continue only if you just started connecting from it.</div>` : ""}
-<p>It will be able to search, read, label, draft and trash email in:</p>
-<ul>${accounts.map((a) => `<li>${esc(a.name || a.email)}${a.name ? ` <span class="muted">${esc(a.email)}</span>` : ""}${a.allow_send === 1 ? ` <span class="pill">can send</span>` : ""}</li>`).join("") || "<li class='muted'>No mailboxes linked yet — anything you link later is included.</li>"}</ul>
-<p class="muted">It can send email only from mailboxes marked <b>can send</b>. You can revoke this any time by removing the connector in Claude.</p>
+<p>${d.clientDomain ? `This app is from <b>${esc(d.clientDomain)}</b>.` : `This app registered itself. ${esc(app)} cannot verify its name.`} If you click <b>Allow</b>, ${esc(app)} sends the access to <b>${esc(d.redirectHost)}</b>.</p>
+${d.redirectIsLoopback ? `<div class="notice">That address is on your computer. Continue only if you started this connection from an app on your computer a moment ago.</div>` : ""}
+<p>The app can search, read, label, draft and trash email in these mailboxes:</p>
+<ul>${accounts.map((a) => `<li>${esc(a.name || a.email)}${a.name ? ` <span class="muted">${esc(a.email)}</span>` : ""}${a.allow_send === 1 ? ` <span class="pill">can send</span>` : ""}</li>`).join("") || "<li class='muted'>You have no linked mailboxes. The access also includes the mailboxes that you link later.</li>"}</ul>
+<p class="muted">The app can send email only from a mailbox with the mark <b>can send</b>. To revoke this access at any time, remove the connector in Claude.</p>
 <form method="post" action="/authorize">
 <input type="hidden" name="handle" value="${esc(handle)}">
 <div class="row"><button name="decision" value="approve">Allow</button><button class="secondary" name="decision" value="deny">Deny</button></div>

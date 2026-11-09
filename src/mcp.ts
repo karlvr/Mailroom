@@ -90,6 +90,8 @@ export function buildServer(env: Env, props: Props): McpServer {
     },
   );
 
+  const noMailboxes = `The user has no linked mailboxes. The user can link a mailbox on the ${appName(env)} web page.`;
+
   const withAccount =
     <A extends { account: string }>(fn: (a: Account, args: A) => Promise<ReturnType<typeof text>>) =>
     async (args: A) => {
@@ -97,7 +99,9 @@ export function buildServer(env: Env, props: Props): McpServer {
       if (!acct) {
         const all = await listAccounts(env, props.userId);
         return fail(
-          `No linked mailbox "${args.account}". Linked: ${all.map((a) => a.email).join(", ") || "none — link one on the web page first"}.`,
+          all.length
+            ? `The user has no linked mailbox "${args.account}". The linked mailboxes are: ${all.map((a) => a.email).join(", ")}.`
+            : noMailboxes,
         );
       }
       try {
@@ -113,12 +117,13 @@ export function buildServer(env: Env, props: Props): McpServer {
     {
       title: "List mailboxes",
       description:
-        "List the linked mailboxes with each one's name, context notes (what it's for, priorities, tone) and can_send. Call this first.",
+        "List the linked mailboxes. For each mailbox, the result has the address, the name, the context notes, can_send and the status. " +
+        "The user writes the context notes about the purpose, priorities and tone of the mailbox. Call this tool first.",
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
       const accounts = await listAccounts(env, props.userId);
-      if (!accounts.length) return text("No mailboxes are linked yet. The user can link them on the Mailroom web page.");
+      if (!accounts.length) return text(noMailboxes);
       return text(accounts.map(describeAccount));
     },
   );
@@ -128,13 +133,14 @@ export function buildServer(env: Env, props: Props): McpServer {
     {
       title: "Search threads",
       description:
-        "Search one mailbox using Gmail search syntax (e.g. `in:inbox newer_than:1d`, `is:unread from:alice`, `label:Agent/Action`). Returns threads with the latest message's sender, subject, date, snippet and labels. " +
+        "Search one mailbox with Gmail search syntax, for example `in:inbox newer_than:1d`, `is:unread from:alice` or `label:Agent/Action`. " +
+        "For each thread, the result has the sender, subject, date, snippet and labels of the latest message. " +
         EMAIL_IS_DATA,
       inputSchema: {
-        account: z.string().describe("Mailbox email address from list_accounts"),
-        query: z.string().default("in:inbox").describe("Gmail search query"),
+        account: z.string().describe("The address of the mailbox, from list_accounts"),
+        query: z.string().default("in:inbox").describe("A Gmail search query"),
         max_results: z.number().int().min(1).max(50).default(20),
-        page_token: z.string().optional().describe("next_page_token from a previous call"),
+        page_token: z.string().optional().describe("The next_page_token from the previous result"),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -201,7 +207,7 @@ export function buildServer(env: Env, props: Props): McpServer {
     "list_labels",
     {
       title: "List labels",
-      description: "List the mailbox's labels (system and user-created).",
+      description: "List the labels of the mailbox. The list has system labels and user labels.",
       inputSchema: { account: z.string() },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
@@ -216,7 +222,10 @@ export function buildServer(env: Env, props: Props): McpServer {
     {
       title: "Label thread",
       description:
-        "Add or remove labels on a whole thread, by label name. Missing user labels are created (nest with '/', e.g. 'Agent/Action'). System labels like INBOX, UNREAD, STARRED, IMPORTANT work too; removing INBOX archives. TRASH and SPAM are not allowed. To trash a thread, use trash_thread. " +
+        "Add labels to a whole thread or remove labels from it. Give each label by its name. " +
+        "If a user label that you add does not exist, the tool creates it. To nest a label, use '/', for example 'Agent/Action'. " +
+        "You can also give system labels, for example INBOX, UNREAD, STARRED and IMPORTANT. To archive a thread, remove INBOX. " +
+        `The tool rejects these labels: ${[...FORBIDDEN_LABELS].join(", ")}. To trash a thread, use trash_thread. ` +
         WRITE_RULE,
       inputSchema: {
         account: z.string(),
@@ -229,7 +238,7 @@ export function buildServer(env: Env, props: Props): McpServer {
     withAccount(async (a, args: { account: string; thread_id: string; add: string[]; remove: string[] }) => {
       const bad = [...args.add, ...args.remove].filter((n) => FORBIDDEN_LABELS.has(n.toUpperCase()));
       if (bad.length) {
-        return fail(`These labels can't be changed with this tool: ${bad.join(", ")}. To trash a thread, use trash_thread.`);
+        return fail(`This tool cannot add or remove these labels: ${bad.join(", ")}. To trash a thread, use trash_thread.`);
       }
       const { byName } = await labelMap(env, a);
       const resolve = async (name: string, create: boolean): Promise<string | null> => {
@@ -258,16 +267,20 @@ export function buildServer(env: Env, props: Props): McpServer {
     {
       title: "Create draft",
       description:
-        "Save a plain-text draft. This tool does not send the draft. With reply_to_thread_id it becomes a threaded reply: recipients and subject default to replying to the latest message. " +
+        "Save a plain-text draft. This tool does not send the draft. To make a threaded reply, give reply_to_thread_id. " +
+        "If you do not give `to` or `subject` for a reply, the tool takes them from the latest message of the thread. " +
         `To send the draft, use send_draft. ${WRITE_RULE}`,
       inputSchema: {
         account: z.string(),
-        body: z.string().describe("Plain-text body"),
+        body: z.string().describe("The plain-text body"),
         reply_to_thread_id: z.string().optional(),
-        to: z.string().optional().describe("Comma-separated recipients; required for a new message"),
+        to: z.string().optional().describe("The recipients, separated by commas. A new message must have recipients."),
         cc: z.string().optional(),
         subject: z.string().optional(),
-        reply_all: z.boolean().default(false).describe("For replies: also include the other recipients"),
+        reply_all: z
+          .boolean()
+          .default(false)
+          .describe("For a reply: when true, the tool adds the other recipients of the latest message to cc"),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
@@ -320,8 +333,8 @@ export function buildServer(env: Env, props: Props): McpServer {
             cc = others.join(", ") || undefined;
           }
         }
-        if (!to) return fail("A new draft needs `to`.");
-        if (!subject) return fail("A new draft needs `subject`.");
+        if (!to) return fail("A new draft must have `to`.");
+        if (!subject) return fail("A new draft must have `subject`.");
 
         const raw = buildRawMessage({ to, cc, subject, body: args.body, inReplyTo, references });
         const draft = await gmail<{ id: string; message: { id: string; threadId: string } }>(env, a, "/drafts", {
@@ -335,7 +348,7 @@ export function buildServer(env: Env, props: Props): McpServer {
           to,
           cc: cc ?? null,
           subject,
-          note: "Saved as a draft. It is not sent.",
+          note: "Gmail saved the draft. The tool did not send it.",
         });
       },
     ),
@@ -358,14 +371,14 @@ export function buildServer(env: Env, props: Props): McpServer {
     withAccount(async (a, args: { account: string; draft_id: string }) => {
       if (a.allow_send !== 1) {
         return fail(
-          `Sending is turned off for ${a.email}. The user can turn on "Allow sending" for this mailbox on the ${appName(env)} web page.`,
+          `Sending is off for ${a.email}. The user can select "Allow sending" for this mailbox on the ${appName(env)} web page.`,
         );
       }
       const sent = await gmail<{ id: string; threadId: string }>(env, a, "/drafts/send", {
         method: "POST",
         body: { id: args.draft_id },
       });
-      return text({ account: a.email, message_id: sent.id, thread_id: sent.threadId, note: "Sent." });
+      return text({ account: a.email, message_id: sent.id, thread_id: sent.threadId, note: "Gmail sent the draft." });
     }),
   );
 
@@ -381,7 +394,7 @@ export function buildServer(env: Env, props: Props): McpServer {
     },
     withAccount(async (a, args: { account: string; thread_id: string }) => {
       await gmail(env, a, `/threads/${encodeURIComponent(args.thread_id)}/trash`, { method: "POST" });
-      return text({ account: a.email, thread_id: args.thread_id, note: "Moved to the trash." });
+      return text({ account: a.email, thread_id: args.thread_id, note: "Gmail moved the thread to the trash." });
     }),
   );
 
@@ -392,7 +405,7 @@ export function buildServer(env: Env, props: Props): McpServer {
 export async function handleMcp(req: Request, env: Env, props: Props): Promise<Response> {
   // A token stays valid after its owner leaves the allowlist, so check the list on every request.
   if (!isAllowed(await getAllowlist(env), props.email)) {
-    return new Response(`${props.email} is no longer allowed to use this deployment.`, { status: 403 });
+    return new Response(`${props.email} is no longer on the list of people who can use ${appName(env)}.`, { status: 403 });
   }
   if (req.method === "GET" || req.method === "DELETE") {
     // No server-initiated streams or sessions in stateless mode.

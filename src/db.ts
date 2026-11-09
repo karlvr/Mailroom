@@ -19,7 +19,7 @@ export async function setConfig(env: Env, key: string, value: string): Promise<v
 }
 
 export async function dataKey(env: Env): Promise<CryptoKey> {
-  if (!env.ADMIN_PASSWORD) throw new Error("ADMIN_PASSWORD secret is not set");
+  if (!env.ADMIN_PASSWORD) throw new Error("The ADMIN_PASSWORD secret is not set.");
   let salt = await getConfig(env, "kdf_salt");
   if (!salt) {
     salt = randomToken(16);
@@ -141,7 +141,7 @@ export async function getRefreshToken(env: Env, account: Account): Promise<strin
   const row = await env.DB.prepare("SELECT refresh_token FROM accounts WHERE id = ?")
     .bind(account.id)
     .first<{ refresh_token: string }>();
-  if (!row) throw new Error("Account not found");
+  if (!row) throw new Error("The account does not exist.");
   return decrypt(await dataKey(env), row.refresh_token, `refresh:${account.user_id}:${account.email.toLowerCase()}`);
 }
 

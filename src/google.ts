@@ -85,7 +85,7 @@ export async function exchangeCode(
     email_verified?: boolean;
     aud: string;
   };
-  if (claims.aud !== cfg.clientId) throw new Error("ID token audience mismatch");
+  if (claims.aud !== cfg.clientId) throw new Error("The audience of the ID token does not match the Client ID.");
   return {
     sub: claims.sub,
     email: claims.email,
@@ -114,13 +114,15 @@ async function accessToken(env: Env, account: Account): Promise<string> {
   if (hit && hit.expires > Date.now() + 60_000) return hit.token;
 
   const cfg = await getGoogleConfig(env);
-  if (!cfg) throw new Error("Google isn't configured yet. Finish the setup wizard first.");
+  if (!cfg) throw new Error("Google is not configured. Complete the setup page first.");
   let refresh: string;
   try {
     refresh = await getRefreshToken(env, account);
   } catch {
-    await setAccountStatus(env, account.id, "relink", "Stored token can't be decrypted (was ADMIN_PASSWORD changed?)");
-    throw new AccountNeedsRelink(`${account.email}: stored access can't be decrypted. Re-link this mailbox.`);
+    await setAccountStatus(env, account.id, "relink", "The stored Google token cannot be decrypted. Possibly ADMIN_PASSWORD changed.");
+    throw new AccountNeedsRelink(
+      `The stored Google token for ${account.email} cannot be decrypted. The user must re-link this mailbox on ${appUrlHint}.`,
+    );
   }
   const res = await fetch(TOKEN_URL, {
     method: "POST",
@@ -135,12 +137,12 @@ async function accessToken(env: Env, account: Account): Promise<string> {
   const data = (await res.json()) as TokenResponse;
   if (!res.ok || !data.access_token) {
     if (data.error === "invalid_grant") {
-      await setAccountStatus(env, account.id, "relink", data.error_description ?? "Google access was revoked or expired");
+      await setAccountStatus(env, account.id, "relink", data.error_description ?? "The Google access was revoked, or it expired.");
       throw new AccountNeedsRelink(
-        `${account.email}: Google access was revoked or has expired. Re-link this mailbox in ${appUrlHint}.`,
+        `The Google access for ${account.email} was revoked, or it expired. The user must re-link this mailbox on ${appUrlHint}.`,
       );
     }
-    throw new Error(`Couldn't refresh Google access for ${account.email}: ${data.error_description || data.error || res.status}`);
+    throw new Error(`Could not refresh the Google access for ${account.email}: ${data.error_description || data.error || res.status}`);
   }
   if (account.status !== "ok") await setAccountStatus(env, account.id, "ok", null);
   accessTokens.set(account.id, { token: data.access_token, expires: Date.now() + (data.expires_in ?? 3600) * 1000 });

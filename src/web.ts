@@ -22,7 +22,9 @@ import {
   dashboardPage,
   landingPage,
   messagePage,
+  privacyPage,
   setupPage,
+  termsPage,
 } from "./ui";
 
 const USER_COOKIE = "__Host-mr_s";
@@ -103,14 +105,16 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
   if (!env.ADMIN_PASSWORD) {
     return messagePage(
       app,
-      "Almost there",
-      "This Worker has no ADMIN_PASSWORD secret. Add one in the Cloudflare dashboard (Worker → Settings → Variables and Secrets), then reload this page.",
+      "Set the admin password",
+      "This Worker has no ADMIN_PASSWORD secret. In the Cloudflare dashboard, add the secret in Worker → Settings → Variables and Secrets. Then reload this page.",
     );
   }
 
   try {
     if (path === "/healthz") return new Response("ok");
     if (path === "/" && method === "GET") return home(req, env, origin, app);
+    if (path === "/privacy" && method === "GET") return privacyPage(app, origin);
+    if (path === "/terms" && method === "GET") return termsPage(app, origin);
     if (path === "/setup" && method === "GET") return setupGet(req, env, origin, app);
     if (path === "/setup/login" && method === "POST") return setupLogin(req, env, origin, app);
     if (path === "/setup" && method === "POST") return setupSave(req, env, origin, app);
@@ -121,12 +125,12 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
     if (path === "/authorize") return authorize(req, env, app);
     const m = path.match(/^\/accounts\/([\w-]+)(\/remove)?$/);
     if (m && method === "POST") return accountPost(req, env, ctx, m[1], !!m[2]);
-    return messagePage(app, "Not found", "There's nothing at this address.", { href: "/", text: "Go home" });
+    return messagePage(app, "Not found", "This page does not exist.", { href: "/", text: "Home page" });
   } catch (e) {
     if (e instanceof AuthorizationError && e.redirectTo) return redirect(e.redirectTo);
     if (e instanceof AuthorizationError || e instanceof CimdFetchError) {
-      const msg = e instanceof AuthorizationError ? e.description : "This app could not be verified.";
-      return messagePage(app, "Couldn't connect", msg);
+      const msg = e instanceof AuthorizationError ? e.description : `${app} could not verify this app.`;
+      return messagePage(app, "Connection failed", msg);
     }
     throw e;
   }
@@ -160,11 +164,11 @@ async function setupLogin(req: Request, env: Env, origin: string, app: string) {
   const ip = req.headers.get("CF-Connecting-IP") ?? "unknown";
   const failKey = `mr:pwfail:${ip}`;
   const fails = Number((await env.OAUTH_KV.get(failKey)) ?? 0);
-  if (fails >= 10) return adminLoginPage(app, "Too many attempts. Try again in 15 minutes.");
+  if (fails >= 10) return adminLoginPage(app, `${app} blocked this IP address after 10 incorrect passwords. Try again in 15 minutes.`);
   const f = await form(req);
   if (!safeEqual(String(f.get("password") ?? ""), env.ADMIN_PASSWORD)) {
     await env.OAUTH_KV.put(failKey, String(fails + 1), { expirationTtl: 900 });
-    return adminLoginPage(app, "That password doesn't match the ADMIN_PASSWORD secret.");
+    return adminLoginPage(app, "That password does not match the ADMIN_PASSWORD secret.");
   }
   const token = randomToken();
   await env.OAUTH_KV.put(`mr:admin:${await sha256(token)}`, JSON.stringify({ csrf: randomToken(16) }), {
@@ -185,11 +189,11 @@ async function setupSave(req: Request, env: Env, origin: string, app: string) {
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
   if (!/^[\w-]+\.apps\.googleusercontent\.com$/.test(clientId)) {
-    return setupGet(req, env, origin, app, { error: "The Client ID should end in .apps.googleusercontent.com." });
+    return setupGet(req, env, origin, app, { error: "The Client ID must end with .apps.googleusercontent.com." });
   }
   if (!allowlist.length || allowlist.some((e) => !/^[^@\s]*@[^@\s]+\.[^@\s]+$/.test(e))) {
     return setupGet(req, env, origin, app, {
-      error: "Add at least one email address or @domain under “Who can use this”.",
+      error: "Enter at least one entry under “Who can use this”. Each entry must be an email address or an @domain.",
     });
   }
   const existing = await getGoogleConfig(env);
@@ -244,16 +248,16 @@ async function googleCallback(req: Request, env: Env, origin: string, app: strin
   const data = await env.OAUTH_KV.get<GoogleState>(key, "json");
   await env.OAUTH_KV.delete(key);
   const clear = setCookie(GSTATE_COOKIE, "", 0);
-  if (!data) return messagePage(app, "Sign-in expired", "That sign-in link was already used or took too long.", { href: "/", text: "Start again" });
+  if (!data) return messagePage(app, "Sign-in expired", "You already used that sign-in link, or it expired.", { href: "/", text: "Start again" });
 
   const err = url.searchParams.get("error");
   if (err) {
     return messagePage(
       app,
-      err === "access_denied" ? "Cancelled" : "Google said no",
+      err === "access_denied" ? "Cancelled" : "Google denied access",
       err === "access_denied"
-        ? "Nothing was changed."
-        : `Google returned “${err}”. If this is a Workspace account, its admin may need to trust the app (setup step 6).`,
+        ? `${app} made no changes.`
+        : `Google returned the error “${err}”. If this is a Workspace account, an admin of that organisation may need to trust the app. See step 6 of the setup page.`,
       { href: "/", text: "Back" },
     );
   }
@@ -266,7 +270,7 @@ async function googleCallback(req: Request, env: Env, origin: string, app: strin
       return messagePage(
         app,
         "Not on the list",
-        `${result.email} isn't allowed to use this deployment. The admin can add it in setup.`,
+        `${result.email} is not on the list of people who can use ${app}. The admin can add it on the setup page.`,
         { href: "/login", text: "Use another account" },
       );
     }
@@ -284,18 +288,21 @@ async function googleCallback(req: Request, env: Env, origin: string, app: strin
     return messagePage(
       app,
       "Gmail permission missing",
-      "Google's screen lets you untick permissions. Link again and leave the Gmail box ticked.",
+      `${app} did not get the Gmail permission. On the Google consent screen, you can clear each permission. When you link the mailbox again, keep the Gmail check box selected.`,
       { href: `/accounts/link?hint=${encodeURIComponent(result.email)}`, text: "Link again" },
     );
   }
   if (!result.refreshToken) {
-    return messagePage(app, "Google didn't grant lasting access", "Try linking again.", {
+    return messagePage(app, "Google did not grant lasting access", "Try to link the mailbox again.", {
       href: `/accounts/link?hint=${encodeURIComponent(result.email)}`,
       text: "Link again",
     });
   }
   await saveLinkedAccount(env, session.userId, result.email, result.refreshToken);
-  return redirect(`/?msg=${encodeURIComponent(`Linked ${result.email}. Add a name and some context so Claude knows what it's for.`)}`, [clear]);
+  return redirect(
+    `/?msg=${encodeURIComponent(`${app} linked ${result.email}. Give the mailbox a short name and context notes. ${app} instructs Claude to read them before it works in that mailbox.`)}`,
+    [clear],
+  );
 }
 
 async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: string, remove: boolean) {
@@ -310,7 +317,7 @@ async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: st
       const token = await getRefreshToken(env, acct).catch(() => null);
       await deleteAccount(env, session.userId, id);
       if (token) ctx.waitUntil(revokeToken(token));
-      return redirect(`/?msg=${encodeURIComponent(`Removed ${acct.email} and revoked its Google access.`)}`);
+      return redirect(`/?msg=${encodeURIComponent(`${appName(env)} removed ${acct.email} and revoked its Google access.`)}`);
     }
     return redirect("/");
   }
@@ -319,7 +326,7 @@ async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: st
     context: String(f.get("context") ?? "").trim(),
     allowSend: f.get("allow_send") === "1",
   });
-  return redirect("/?msg=Saved.");
+  return redirect(`/?msg=${encodeURIComponent(`${appName(env)} saved your changes.`)}`);
 }
 
 // ---------- OAuth for Claude (MCP clients) ----------
@@ -330,7 +337,10 @@ async function authorize(req: Request, env: Env, app: string) {
   if (!session) {
     if (req.method !== "GET") return redirect("/");
     if (!(await getGoogleConfig(env))) {
-      return messagePage(app, "Not set up yet", "Finish setup on this Worker before connecting Claude.", { href: "/setup", text: "Open setup" });
+      return messagePage(app, "Setup is not complete", "Complete the setup page before you connect Claude.", {
+        href: "/setup",
+        text: "Open the setup page",
+      });
     }
     return redirect(`/login?next=${encodeURIComponent(url.pathname + url.search)}`);
   }

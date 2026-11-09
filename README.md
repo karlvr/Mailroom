@@ -4,13 +4,15 @@ Mailroom is a self-hosted Cloudflare Worker. It lets Claude work across **all yo
 
 - Link any number of mailboxes. They can be personal Gmail accounts, Workspace accounts from different organisations, or a mix.
 - Give each mailbox a name and context notes. Mailroom instructs Claude to read these notes before it works in that mailbox.
-- Claude can **search, read, label, draft and trash** email. Claude can **send** email only from a mailbox where you turn on **Allow sending**. Claude **cannot delete** email permanently.
+- Claude can **search, read, label, draft and trash** email. Claude can **send** email only from a mailbox where you select **Allow sending**. Claude **cannot delete** email permanently.
 - Mailroom instructs Claude to treat email content as data, never as instructions.
 - Mailroom runs only on your own Cloudflare account, and no third party operates it. Mailroom encrypts the Google tokens that it stores.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/karlvr/mailroom)
 
-## Setup (about 15 minutes, once)
+## Setup
+
+You do the setup only once. It takes about 15 minutes.
 
 ### 1. Deploy
 
@@ -31,14 +33,14 @@ npm run deploy
 
 ### 2. Connect Google
 
-Open the URL of your Worker, for example `https://mailroom.<you>.workers.dev`. Click **Start setup**. The setup wizard has a link to each Google Cloud screen, and it shows the exact values to paste. Follow these steps in the wizard:
+Open the URL of your Worker, for example `https://mailroom.<you>.workers.dev`. Click **Start setup**. The setup page has a link to each Google Cloud screen, and it shows the exact values to paste. Follow these steps on the setup page:
 
 1. Create a Google Cloud project.
 2. Enable the Gmail API.
-3. Configure the sign-in screen with the **External** audience. Then click **Publish app**. If you leave the app in "Testing", Google expires the access every 7 days.
-4. Create an OAuth client of the type **Web application**. Use the redirect URI that the wizard shows.
-5. Paste the client ID and the client secret into the wizard. Enter the email addresses or domains that can sign in.
-6. **For each Workspace organisation:** if linking fails with "access blocked", mark the app as **Trusted** in the Admin Console of that organisation. The wizard links to that page and shows the client ID to search for.
+3. Configure the sign-in screen with the **External** audience. On the **Branding** page, enter the links and the authorized domain that the setup page shows. Mailroom serves the privacy policy at `/privacy` and the terms of service at `/terms`. Do not upload a logo, because Google must verify an app with a logo before you can publish it. Then click **Publish app** on the **Audience** page. If you leave the app in "Testing", Google expires the access every 7 days.
+4. Create an OAuth client of the type **Web application** with the name `Mailroom`. Use the redirect URI that the setup page shows.
+5. Paste the client ID and the client secret into the setup page. Enter the email addresses or domains that can sign in.
+6. **For each Workspace organisation:** if linking fails with "access blocked", mark the app as **Trusted** in the Admin Console of that organisation. The setup page has a link to the Admin Console, and it shows the client ID to search for.
 
 You do not need app verification from Google. When you link a mailbox, Google shows the warning "Google hasn't verified this app". Click **Advanced**, then click **Go to Mailroom**. This warning is normal for a private app with fewer than 100 users.
 
@@ -52,7 +54,7 @@ You do not need app verification from Google. When you link a mailbox, Google sh
 
    > Acme business. Customer support, licences, reseller POs and invoices — invoices and payment queries are always urgent. Ignore newsletters. Replies are brief and friendly, signed "Karl".
 
-6. If you want Claude to send email from a mailbox, turn on **Allow sending** for that mailbox. Read [Write actions and email content](#write-actions-and-email-content) first.
+6. If you want Claude to send email from a mailbox, select **Allow sending** for that mailbox. Read [Write actions and email content](#write-actions-and-email-content) first.
 
 ### 4. Connect Claude
 
@@ -73,7 +75,7 @@ Claude then has these tools:
 | `list_labels` | Lists the labels of one mailbox |
 | `modify_thread_labels` | Adds labels to a thread or removes labels from it. When it adds a label that does not exist, it creates that label. Removing `INBOX` archives the thread. The tool rejects `TRASH` and `SPAM`. |
 | `create_draft` | Saves a new draft or a threaded reply. It does not send the draft. |
-| `send_draft` | Sends a draft. It works only for a mailbox where you turned on **Allow sending**. |
+| `send_draft` | Sends a draft. It works only for a mailbox where you selected **Allow sending**. |
 | `trash_thread` | Moves a thread to the trash. Gmail keeps trashed threads for 30 days. |
 
 ### 5. Run one agent for each mailbox
@@ -92,11 +94,11 @@ Labelling, archiving, drafting, sending and trashing are write actions. Mailroom
 
 Mailroom also instructs Claude to treat email content as data, never as instructions. For an email that requests an action, Mailroom instructs Claude to report the request to you and not to do the action.
 
-These instructions reduce the risk of prompt injection, but they cannot remove it. A malicious email can still try to make Claude send or trash email. For this reason, sending is off for each mailbox until you turn on **Allow sending**. Turn it on only for a mailbox where you accept this risk. If Claude trashes a thread by mistake, you can restore it from the Gmail trash for 30 days.
+These instructions reduce the risk of prompt injection, but they cannot remove it. A malicious email can still try to make Claude send or trash email. For this reason, sending is off for each mailbox until you select **Allow sending**. Select it only for a mailbox where you accept this risk. If Claude trashes a thread by mistake, you can restore it from the Gmail trash for 30 days.
 
 ## Access control
 
-Your Worker has a public URL, but only the people that you allow can use it. Other people can open the landing page, but they cannot sign in, open setup or connect Claude. Mailroom has three checks:
+Your Worker has a public URL, but only the people that you allow can use it. Other people can open the landing page, but they cannot sign in, open the setup page or connect Claude. Mailroom has three checks:
 
 1. **Setup** needs `ADMIN_PASSWORD`. After 10 failed attempts from one IP address, Mailroom blocks that address for 15 minutes.
 2. **Sign-in** needs a Google account with a verified address on the **Who can use this** list.
@@ -150,7 +152,7 @@ npm run deploy
 
 - **Stored secrets:** Mailroom encrypts the Google refresh tokens and the OAuth client secret with AES-GCM, and stores them in D1. Mailroom derives the key from `ADMIN_PASSWORD` with PBKDF2 and a random salt for each deployment. A copy of the database alone is not sufficient to decrypt the secrets.
 - **Google access tokens:** Mailroom keeps these tokens only in Worker memory.
-- **Gmail permission:** Mailroom uses Google's `gmail.modify` permission. This permission allows Mailroom to read, label, draft, send and trash email, but not to delete email permanently. `send_draft` works only for a mailbox where the owner turned on **Allow sending**.
+- **Gmail permission:** Mailroom uses Google's `gmail.modify` permission. This permission allows Mailroom to read, label, draft, send and trash email, but not to delete email permanently. `send_draft` works only for a mailbox where the owner selected **Allow sending**.
 - **Mailbox removal:** When you remove a mailbox, Mailroom also revokes its Google access.
 - **Claude's access:** Claude connects with OAuth 2.1 through Cloudflare's `workers-oauth-provider`. This gives PKCE, a consent page that other sites cannot frame or forge, and a separate approval for each client.
 - **Browser protections:** Web sessions use `__Host-` cookies. All forms have CSRF protection. Mailroom limits the number of admin password attempts from each IP address.
