@@ -147,6 +147,8 @@ input[type=checkbox]{flex:none;width:18px;height:18px;margin:0;accent-color:var(
 .mbx .body>.notice{margin:20px 20px 0}
 .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:28px;padding:22px 20px 24px}
 .caps{align-self:start;border:1px solid var(--line);background:var(--sunken)}
+.fields{display:flex;flex-direction:column}
+.fields textarea{flex:1 1 auto;min-height:260px}
 .caps>.label{padding:10px 14px}
 .caps .r{display:flex;justify-content:space-between;gap:12px;padding:9px 14px;border-top:1px solid var(--line);font-size:14.5px}
 .caps .v{display:inline-flex;align-items:center;gap:6px;font:12px var(--mono);color:var(--accent)}
@@ -902,18 +904,19 @@ export function contextPreview(current: string, text: string): Response {
 /**
  * The script of the proposal on the history page. It shows the Diff and Edit tabs of the proposal,
  * gets a new diff from the preview URL after the user edits the text, and changes Accept to Accept
- * with edits while the text differs from the agent's text. Without the script, the page shows the
- * diff and the text box together.
+ * with edits while the text differs from the agent's text. The Edit button next to Accept opens the
+ * Edit tab and scrolls up to the tabs. Without the script, the page shows the diff and the text box
+ * together.
  */
 const PROPOSAL_JS = `document.querySelectorAll('[data-proposal]').forEach(p=>{
-const tabs=p.querySelector('[role=tablist]'),ta=p.querySelector('textarea'),diff=p.querySelector('[data-pane=diff]'),edit=p.querySelector('[data-pane=edit]'),accept=p.querySelector('[data-accept]'),revert=p.querySelector('[data-revert]'),cap=p.querySelector('[data-caption]'),form=p.querySelector('form');
+const tabs=p.querySelector('[role=tablist]'),ta=p.querySelector('textarea'),diff=p.querySelector('[data-pane=diff]'),edit=p.querySelector('[data-pane=edit]'),accept=p.querySelector('[data-accept]'),revert=p.querySelector('[data-revert]'),editButton=p.querySelector('[data-edit]'),cap=p.querySelector('[data-caption]'),form=p.querySelector('form');
 const original=ta.dataset.original,edited=()=>ta.value!==original;let shown=original;
 const sync=()=>{accept.textContent=edited()?'Accept with edits':'Accept';revert.hidden=!edited()};
 const show=async t=>{
 tabs.querySelectorAll('[role=tab]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===t)));
-edit.hidden=t!=='edit';diff.hidden=t!=='diff';
+edit.hidden=t!=='edit';diff.hidden=t!=='diff';editButton.hidden=t==='edit';
 cap.textContent=t==='edit'?'Edit the text before you accept it':edited()?'Changes from the current context, with your edits':'Changes from the current context';
-if(t==='edit'){ta.focus();return}
+if(t==='edit'){ta.focus({preventScroll:true});return}
 if(ta.value===shown)return;
 const v=ta.value,r=await fetch(p.dataset.preview,{method:'POST',body:new URLSearchParams({csrf:form.elements.csrf.value,context:v})});
 if(r.ok){diff.innerHTML=await r.text();shown=v}
@@ -922,6 +925,7 @@ tabs.hidden=false;
 tabs.addEventListener('click',e=>{const b=e.target.closest('[role=tab]');if(b)show(b.dataset.tab)});
 ta.addEventListener('input',sync);
 revert.addEventListener('click',()=>{ta.value=original;sync();show('diff')});
+editButton.addEventListener('click',()=>{show('edit');tabs.parentElement.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'})});
 show('diff');
 })`;
 
@@ -995,7 +999,7 @@ ${
 }
 <form method="post" action="/accounts/${id}">
 <input type="hidden" name="csrf" value="${esc(csrf)}">
-<div class="cols"><div>
+<div class="cols"><div class="fields">
 <label for="name-${id}">Short name <span class="hint">Claude uses this name for the mailbox</span></label>
 <input id="name-${id}" type="text" name="name" value="${esc(m.name)}" placeholder="For example, Support">
 <label for="context-${id}">Context for Claude</label>
@@ -1169,7 +1173,7 @@ ${stale ? warning("The context changed after the agent made this proposal. The c
 <textarea id="proposal-${p.id}" name="context" maxlength="${MAX_CONTEXT_CHARS}" data-original="${esc(p.context)}">
 ${esc(p.context)}</textarea>
 <p class="help">If you accept with edits, the history keeps the agent's text as one version and your text as the next version. Only your text becomes the current context.</p></div>
-<div class="actions"><div class="row"><button name="decision" value="accept" data-accept>Accept</button><button type="button" class="secondary" data-revert hidden>Revert to the agent's text</button><button class="secondary" name="decision" value="reject">Reject</button></div></div>
+<div class="actions"><div class="row"><button name="decision" value="accept" data-accept>Accept</button><button type="button" class="secondary" data-edit hidden>Edit</button><button type="button" class="secondary" data-revert hidden>Revert to the agent's text</button><button class="secondary" name="decision" value="reject">Reject</button></div></div>
 </form>
 </div>`;
   };
