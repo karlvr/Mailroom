@@ -45,6 +45,7 @@ import {
   summariseEvent,
   toEventTime,
 } from "./calendar";
+import { APP_ICONS } from "./ui";
 
 // Labels that a label change must not add or remove. trash_thread and send_draft are the only
 // ways to trash or send, and spam, drafts and chats are out of scope.
@@ -138,9 +139,14 @@ export interface McpCaller {
   clientId: string | null;
 }
 
-export function buildServer(env: Env, { props, clientId }: McpCaller): McpServer {
+/** Returns an MCP server with the tools for one caller. `origin` is the origin of this Worker, for the links to its icons. */
+export function buildServer(env: Env, { props, clientId }: McpCaller, origin: string): McpServer {
   const server = new McpServer(
-    { name: appName(env), version: "1.0.0" },
+    {
+      name: appName(env),
+      version: "1.0.0",
+      icons: Object.values(APP_ICONS).map((i) => ({ src: `${origin}${i.path}`, mimeType: i.mimeType, sizes: i.sizes })),
+    },
     {
       instructions:
         `${appName(env)} gives access to several Google accounts of the user: the mailbox and, when it is linked, the calendar of each account. ` +
@@ -1039,7 +1045,7 @@ export async function handleMcp(req: Request, env: Env, caller: McpCaller): Prom
     // No server-initiated streams or sessions in stateless mode.
     return new Response(null, { status: 405, headers: { Allow: "POST" } });
   }
-  const server = buildServer(env, caller);
+  const server = buildServer(env, caller, new URL(req.url).origin);
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,

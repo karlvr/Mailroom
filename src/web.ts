@@ -24,6 +24,7 @@ import {
 } from "./db";
 import { GMAIL_SCOPE, authorizeUrl, exchangeCode, hasCalendar, pkcePair, revokeToken } from "./google";
 import {
+  APP_ICONS,
   PERMISSION_FIELDS,
   SETUP_VERSION,
   adminLoginPage,
@@ -114,7 +115,7 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
   const path = url.pathname;
   const method = req.method;
 
-  if (path === "/favicon.svg") return favicon();
+  if (path === APP_ICONS.svg.path) return favicon();
   if (!env.ADMIN_PASSWORD) {
     return messagePage(
       app,
@@ -146,7 +147,8 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
     if (proposal && method === "POST") return proposalPost(req, env, app, proposal[1], Number(proposal[2]));
     const restore = path.match(/^\/accounts\/([\w-]+)\/context\/versions\/(\d+)\/restore$/);
     if (restore && method === "POST") return restorePost(req, env, app, restore[1], Number(restore[2]));
-    return messagePage(app, "Not found", "This page does not exist.", { href: "/", text: "Home page" });
+    const notFound = messagePage(app, "Not found", "This page does not exist.", { href: "/", text: "Home page" });
+    return new Response(notFound.body, { status: 404, headers: notFound.headers });
   } catch (e) {
     if (e instanceof AuthorizationError && e.redirectTo) return redirect(e.redirectTo);
     if (e instanceof AuthorizationError || e instanceof CimdFetchError) {

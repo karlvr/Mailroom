@@ -317,10 +317,30 @@ const ICON = {
 /**
  * Returns the Mailroom mark as an inline SVG: three strokes that make an M and the open sides of an
  * envelope, and a bar that closes the envelope. The SVG carries its own colours, so it also works
- * as a standalone file.
+ * as a standalone file. `public/favicon.png` is a PNG copy of this mark: make it again when the
+ * mark changes.
  */
 const mark = (size: number) =>
   `<svg class="mark" xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 40 40" aria-hidden="true"><rect x=".5" y=".5" width="39" height="39" rx="6.5" fill="#0b1419" stroke="#0b1419"/><path d="M11 26V12.5L20 20.5L29 12.5V26" fill="none" stroke="#fff" stroke-width="3"/><path d="M9.5 30H30.5" stroke="#3ddc97" stroke-width="3"/></svg>`;
+
+/** An icon of the app that this Worker serves. */
+export interface AppIcon {
+  /** The path of the icon on this Worker. */
+  path: string;
+  mimeType: string;
+  /** The sizes that the icon file contains, for example "192x192", or "any" for a vector icon. */
+  sizes: string[];
+}
+
+/**
+ * The icons of the app, in order of preference from lowest to highest. The Worker draws the SVG
+ * with `favicon()`. The PNG is a static copy of the mark in `public/`, for services that do not
+ * accept SVG.
+ */
+export const APP_ICONS = {
+  png: { path: "/favicon.png", mimeType: "image/png", sizes: ["192x192"] },
+  svg: { path: "/favicon.svg", mimeType: "image/svg+xml", sizes: ["any"] },
+} satisfies Record<string, AppIcon>;
 
 /** The size of an envelope-back drawing, in pixels. */
 interface EnvelopeSize {
@@ -394,7 +414,9 @@ export function page(title: string, body: string, opts: PageOptions): Response {
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+${Object.values(APP_ICONS)
+  .map((i) => `<link rel="icon" href="${i.path}" type="${i.mimeType}" sizes="${i.sizes.join(" ")}">`)
+  .join("\n")}
 <link rel="preload" href="/fonts/${FONTS[0].file}" as="font" type="font/woff2" crossorigin>
 <title>${esc(title)} · ${app}</title><style>${CSS}</style></head>
 <body><div class="frame">${BACKDROPS[opts.backdrop ?? "grid"]}
