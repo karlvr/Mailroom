@@ -40,8 +40,8 @@ const grid = (cell: number, position: string) =>
 
 const CSS = `
 ${FONT_FACES}
-:root{color-scheme:light dark;--bg:#fff;--panel:#fff;--sunken:#f6f8f9;--ink:#0b1419;--muted:#55606a;--line:#e3e7ea;--strong:#c7ced4;--grid:rgba(11,20,25,.05);--envelope:rgba(11,20,25,.1);--tick:#9aa5ae;--field:#fff;--code:#f0f3f5;--accent:#0b7a55;--accent-soft:#e8f5ef;--accent-line:#b7dfcb;--accent-ink:#fff;--tile-line:#0b1419;--warn:#8a5300;--warn-bg:#fff7ea;--warn-line:#f0d6a8;--bad:#b42318;--bad-line:#f1b8b2;--bad-soft:#fdeceb;--btn:#0b1419;--btn-ink:#fff;--head:rgba(255,255,255,.88);--shadow:0 1px 2px rgba(11,20,25,.04),0 16px 40px -24px rgba(11,20,25,.2);--sans:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
-@media (prefers-color-scheme:dark){:root{--bg:#070b0d;--panel:#0d1316;--sunken:#0a0f12;--ink:#e3e9ec;--muted:#8e9aa3;--line:#1b2429;--strong:#2a353b;--grid:rgba(140,170,160,.06);--envelope:rgba(140,170,160,.14);--tick:#3a474e;--field:#070b0d;--code:#152025;--accent:#3ddc97;--accent-soft:rgba(61,220,151,.1);--accent-line:rgba(61,220,151,.3);--accent-ink:#04140d;--tile-line:#2a353b;--warn:#f2b65c;--warn-bg:#1f170a;--warn-line:#4a3712;--bad:#ff8a7a;--bad-line:#5a2620;--bad-soft:rgba(255,138,122,.12);--btn:#e3e9ec;--btn-ink:#070b0d;--head:rgba(7,11,13,.88);--shadow:0 24px 48px -24px rgba(0,0,0,.7)}}
+:root{color-scheme:light dark;--bg:#fff;--panel:#fff;--sunken:#f6f8f9;--ink:#0b1419;--muted:#55606a;--line:#e3e7ea;--strong:#c7ced4;--grid:rgba(11,20,25,.05);--envelope:rgba(11,20,25,.1);--tick:#9aa5ae;--field:#fff;--code:#f0f3f5;--accent:#0b7a55;--accent-soft:#e8f5ef;--accent-line:#b7dfcb;--accent-ink:#fff;--tile-line:#0b1419;--warn:#8a5300;--warn-bg:#fff7ea;--warn-line:#f0d6a8;--warn-strong:#c98a1b;--bad:#b42318;--bad-line:#f1b8b2;--bad-soft:#fdeceb;--btn:#0b1419;--btn-ink:#fff;--head:rgba(255,255,255,.88);--shadow:0 1px 2px rgba(11,20,25,.04),0 16px 40px -24px rgba(11,20,25,.2);--sans:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#070b0d;--panel:#0d1316;--sunken:#0a0f12;--ink:#e3e9ec;--muted:#8e9aa3;--line:#1b2429;--strong:#2a353b;--grid:rgba(140,170,160,.06);--envelope:rgba(140,170,160,.14);--tick:#3a474e;--field:#070b0d;--code:#152025;--accent:#3ddc97;--accent-soft:rgba(61,220,151,.1);--accent-line:rgba(61,220,151,.3);--accent-ink:#04140d;--tile-line:#2a353b;--warn:#f2b65c;--warn-bg:#1f170a;--warn-line:#4a3712;--warn-strong:#b9852f;--bad:#ff8a7a;--bad-line:#5a2620;--bad-soft:rgba(255,138,122,.12);--btn:#e3e9ec;--btn-ink:#070b0d;--head:rgba(7,11,13,.88);--shadow:0 24px 48px -24px rgba(0,0,0,.7)}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 var(--sans)}
 .frame{position:relative;min-height:100vh;display:flex;flex-direction:column;overflow:hidden}
@@ -120,8 +120,13 @@ input[type=checkbox]{flex:none;width:18px;height:18px;margin:0;accent-color:var(
 .notice a{color:inherit;font-weight:500}
 .notice.info{border-color:var(--line);background:var(--sunken);color:var(--ink)}
 .notice.info::before{content:"";flex:none;width:6px;height:6px;margin-top:9px;background:var(--accent)}
-.notice.ok{border-color:var(--accent-line);background:var(--accent-soft);color:var(--ink)}
-.notice.ok a{color:var(--accent)}
+.notice.done{align-items:center;gap:12px;padding:12px 16px;border-color:var(--accent);background:var(--accent);color:var(--accent-ink);font-size:15px;font-weight:500}
+.notice.done svg{width:16px;height:16px;margin-top:0}
+.notice.error{border-color:var(--bad);background:var(--bad-soft);color:var(--ink)}
+.notice.error svg{color:var(--bad)}
+.band{display:flex;flex-wrap:wrap;align-items:center;gap:12px 20px;margin-top:-1px;padding:14px 20px;border-top:1px solid var(--warn-strong);border-bottom:1px solid var(--warn-line);background:var(--warn-bg);font-size:14.5px}
+.band .label{color:var(--warn)}
+.band p{flex:1 1 320px;margin:0}
 .note{padding:12px 14px;border:1px solid var(--line);background:var(--sunken);font-size:14.5px;color:var(--muted)}
 .note b{color:var(--ink)}
 .pill{display:inline-flex;align-items:center;gap:7px;padding:2px 8px;border:1px solid var(--line);font:500 11.5px var(--mono);letter-spacing:.04em;text-transform:uppercase;color:var(--muted);white-space:nowrap}
@@ -475,7 +480,56 @@ const mailboxId = (n: number) => `MBX·${String(n).padStart(2, "0")}`;
 const authorizedDomain = (hostname: string) =>
   hostname.split(".").slice(hostname.endsWith(".workers.dev") ? -3 : -2).join(".");
 
-const warning = (html: string) => `<div class="notice">${ICON.warn}<span>${html}</span></div>`;
+/** The kind of a message panel, which sets its style: the result of an action, a warning or an error. */
+type NoticeKind = "done" | "warning" | "error";
+
+const NOTICE_ICONS: Record<NoticeKind, string> = { done: ICON.check, warning: ICON.warn, error: ICON.cross };
+
+/** Returns a message panel. `html` must be trusted HTML. */
+const notice = (kind: NoticeKind, html: string) => `<div class="notice ${kind}">${NOTICE_ICONS[kind]}<span>${html}</span></div>`;
+
+const warning = (html: string) => notice("warning", html);
+
+/**
+ * The messages that a page can show after a redirect, by code. The redirect names each code in a
+ * `msg` parameter. A page shows only these fixed texts, never text from the request.
+ */
+const MESSAGES = {
+  saved: { kind: "done", html: (a) => `${a} saved your changes.` },
+  linked: {
+    kind: "done",
+    html: (a) => `${a} linked the mailbox. Give it a short name and context notes. ${a} instructs Claude to read them before it works in that mailbox.`,
+  },
+  "no-calendar": {
+    kind: "warning",
+    html: (a) => `${a} did not get the Calendar permissions, so Claude cannot use the calendar of this mailbox. To add the calendar, click <b>Re-link</b> and keep the Calendar check boxes selected.`,
+  },
+  removed: { kind: "done", html: (a) => `${a} removed the mailbox and revoked its Google access.` },
+  "form-expired": { kind: "error", html: () => "That form expired. Try again." },
+  "context-too-long": {
+    kind: "error",
+    html: (a) => `The context can have at most ${MAX_CONTEXT_CHARS} characters. ${a} did not save your edits.`,
+  },
+  accepted: { kind: "done", html: (a) => `${a} accepted the proposal. It is now the current context.` },
+  edited: { kind: "done", html: (a) => `${a} accepted the proposal with your edits. Your edited text is now the current context.` },
+  rejected: { kind: "done", html: (a) => `${a} rejected and deleted the proposal.` },
+  "proposal-not-found": { kind: "error", html: () => "That proposal does not exist, or it already has a decision." },
+  restored: { kind: "done", html: (a) => `${a} restored the version. It is now the current context.` },
+  unchanged: { kind: "warning", html: () => "That version has the same text as the current context. The context did not change." },
+  "version-not-found": { kind: "error", html: () => "That version does not exist." },
+} satisfies Record<string, { kind: NoticeKind; html: (escapedApp: string) => string }>;
+
+/** The code of a message that a page can show after a redirect. */
+export type MessageCode = keyof typeof MESSAGES;
+
+/** Returns the message codes among `values`, in order. Use this on the `msg` parameters of a request, so that a page shows only known messages. */
+export function messageCodes(values: readonly string[]): MessageCode[] {
+  return values.filter((v): v is MessageCode => Object.hasOwn(MESSAGES, v));
+}
+
+/** Returns the message panels for these codes, in order. */
+const messagePanels = (app: string, codes: readonly MessageCode[]) =>
+  codes.map((c) => notice(MESSAGES[c].kind, MESSAGES[c].html(esc(app)))).join("\n");
 
 export function messagePage(app: string, title: string, message: string, link?: { href: string; text: string }) {
   return page(
@@ -656,8 +710,8 @@ ${subSteps([
 <nav class="rail" aria-label="Setup steps"><div class="panel"><div class="label">Steps</div>${rail}</div>
 <div class="panel worker"><div class="label">This Worker</div><div class="mono">${esc(new URL(origin).host)}</div></div></nav>
 <div class="stack">
-${s.saved ? `<div class="notice ok">${a} saved the settings. <a href="/">Sign in and link your mailboxes →</a></div>` : ""}
-${s.confirmed ? `<div class="notice ok">${a} recorded that the setup is up to date.</div>` : ""}
+${s.saved ? notice("done", `${a} saved the settings. <a href="/">Sign in and link your mailboxes →</a>`) : ""}
+${s.confirmed ? notice("done", `${a} recorded that the setup is up to date.`) : ""}
 ${update}
 ${s.error ? warning(esc(s.error)) : ""}
 <div class="notice info"><span>The Mailroom software is free of charge. You pay the costs of your Cloudflare account and your Google Cloud project. To decide which plans you need, read <a href="/costs">Costs</a>.</span></div>
@@ -944,7 +998,8 @@ export function dashboardPage(
   history: Map<string, ContextSummary>,
   csrf: string,
   notices: {
-    flash?: string;
+    /** The messages to show at the top of the page. */
+    messages?: readonly MessageCode[];
     /** True when this version has setup steps that the admin did not complete. */
     setupOutdated?: boolean;
   } = {},
@@ -991,12 +1046,12 @@ export function dashboardPage(
     }</span>
 <span class="chev">${ICON.chevron}</span></summary>
 <div class="body">
-${m.status !== "ok" ? warning(`${esc(m.status_detail || "Google access stopped working.")} <a href="${relink}">Re-link</a>`) : ""}
 ${
   hasProposal(m)
-    ? `<div class="notice info"><span>An agent proposed a change to the context. The context changes only when you accept it. <a href="${historyHref(m.id)}#proposal">Review the proposal</a></span></div>`
+    ? `<div class="band"><span class="label">Proposal waiting</span><p>An agent proposed a change to the context. The context changes only when you accept it.</p><a class="btn" href="${historyHref(m.id)}#proposal">Review the proposal${ICON.arrow}</a></div>`
     : ""
 }
+${m.status !== "ok" ? warning(`${esc(m.status_detail || "Google access stopped working.")} <a href="${relink}">Re-link</a>`) : ""}
 <form method="post" action="/accounts/${id}">
 <input type="hidden" name="csrf" value="${esc(csrf)}">
 <div class="cols"><div class="fields">
@@ -1023,7 +1078,7 @@ ${
   };
   return page(
     "Mailboxes",
-    `${notices.flash ? `<div class="notice info">${esc(notices.flash)}</div>` : ""}
+    `${messagePanels(app, notices.messages ?? [])}
 ${
   notices.setupOutdated
     ? warning(`This version of ${a} needs a new setup step. The admin must open the <a href="/setup">setup page</a> and do the steps marked New. Until then, some tools can fail.`)
@@ -1138,7 +1193,8 @@ export interface ContextPageData {
   selectedId?: number;
   compare: ContextCompare;
   csrf: string;
-  flash?: string;
+  /** The messages to show at the top of the page. */
+  messages?: readonly MessageCode[];
 }
 
 export function contextPage(app: string, who: string, account: Account, h: ContextPageData) {
@@ -1237,7 +1293,7 @@ ${
 
   return page(
     "Context history",
-    `${h.flash ? `<div class="notice info">${esc(h.flash)}</div>` : ""}
+    `${messagePanels(app, h.messages ?? [])}
 <div class="rule"><span class="n">Context</span><span>${esc(account.name || account.email)}</span><span class="end">${versions.length} ${versions.length === 1 ? "version" : "versions"}</span></div>
 <div class="title"><div><h1>Context history</h1>
 <p class="lede">${a} instructs Claude to read the current context of <b>${esc(account.email)}</b> before it works in this mailbox. An agent can only propose a change. The context changes only when you accept the proposal. The name of the app comes from the Claude connection that you approved. The agent gives its own name, in quotes, and its reason. ${a} cannot verify them.</p></div>

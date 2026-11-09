@@ -27,6 +27,7 @@ import {
 import { GMAIL_SCOPE, authorizeUrl, exchangeCode, hasCalendar, pkcePair, revokeToken } from "./google";
 import {
   APP_ICONS,
+  type MessageCode,
   PERMISSION_FIELDS,
   SETUP_VERSION,
   adminLoginPage,
@@ -37,6 +38,7 @@ import {
   dashboardPage,
   favicon,
   landingPage,
+  messageCodes,
   messagePage,
   privacyPage,
   setupPage,
@@ -75,6 +77,10 @@ function cookie(req: Request, name: string): string | undefined {
 
 const setCookie = (name: string, value: string, maxAge: number) =>
   `${name}=${encodeURIComponent(value)}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
+
+/** Returns `path` with a `msg` parameter for each message that the page shows after the redirect. */
+const withMessages = (path: string, ...codes: MessageCode[]) =>
+  codes.length ? `${path}?${codes.map((c) => `msg=${encodeURIComponent(c)}`).join("&")}` : path;
 
 function redirect(location: string, cookies: string[] = []): Response {
   const headers = new Headers({ Location: location, "Cache-Control": "no-store" });
@@ -149,9 +155,9 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
     const preview = path.match(/^\/accounts\/([\w-]+)\/context\/preview$/);
     if (preview && method === "POST") return previewPost(req, env, preview[1]);
     const proposal = path.match(/^\/accounts\/([\w-]+)\/context\/proposals\/(\d+)$/);
-    if (proposal && method === "POST") return proposalPost(req, env, app, proposal[1], Number(proposal[2]));
+    if (proposal && method === "POST") return proposalPost(req, env, proposal[1], Number(proposal[2]));
     const restore = path.match(/^\/accounts\/([\w-]+)\/context\/versions\/(\d+)\/restore$/);
-    if (restore && method === "POST") return restorePost(req, env, app, restore[1], Number(restore[2]));
+    if (restore && method === "POST") return restorePost(req, env, restore[1], Number(restore[2]));
     const notFound = messagePage(app, "Not found", "This page does not exist.", { href: "/", text: "Home page" });
     return new Response(notFound.body, { status: 404, headers: notFound.headers });
   } catch (e) {
@@ -170,11 +176,11 @@ async function home(req: Request, env: Env, origin: string, app: string) {
   const cfg = await getGoogleConfig(env);
   const session = await getUserSession(env, req);
   if (!cfg || !session) return landingPage(app, origin, !!cfg);
-  const flash = new URL(req.url).searchParams.get("msg") ?? undefined;
+  const messages = messageCodes(new URL(req.url).searchParams.getAll("msg"));
   const accounts = await listAccounts(env, session.userId);
   const history = await contextSummaries(env, session.userId);
   const setupOutdated = (await getSetupVersion(env)) < SETUP_VERSION;
-  return dashboardPage(app, origin, session.email, accounts, history, session.csrf, { flash, setupOutdated });
+  return dashboardPage(app, origin, session.email, accounts, history, session.csrf, { messages, setupOutdated });
 }
 
 async function setupGet(
@@ -351,20 +357,15 @@ async function googleCallback(req: Request, env: Env, origin: string, app: strin
     refreshToken: result.refreshToken,
     scopes: result.scopes,
   });
-  const calendarNote = hasCalendar(result.scopes)
-    ? ""
-    : ` ${app} did not get the Calendar permissions, so Claude cannot use the calendar of this account. To add the calendar, click Re-link and keep the Calendar check boxes selected.`;
-  return redirect(
-    `/?msg=${encodeURIComponent(`${app} linked ${result.email}. Give the mailbox a short name and context notes. ${app} instructs Claude to read them before it works in that mailbox.${calendarNote}`)}`,
-    [clear],
-  );
+  const messages: MessageCode[] = hasCalendar(result.scopes) ? ["linked"] : ["linked", "no-calendar"];
+  return redirect(withMessages("/", ...messages), [clear]);
 }
 
 async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: string, remove: boolean) {
   const session = await getUserSession(env, req);
   if (!session) return redirect("/");
   const f = await form(req);
-  if (!checkCsrf(f, session.csrf)) return redirect("/?msg=That%20form%20expired.%20Try%20again.");
+  if (!checkCsrf(f, session.csrf)) return redirect(withMessages("/", "form-expired"));
   if (remove) {
     const accounts = await listAccounts(env, session.userId);
     const acct = accounts.find((a) => a.id === id);
@@ -372,7 +373,7 @@ async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: st
       const token = await getRefreshToken(env, acct).catch(() => null);
       await deleteAccount(env, session.userId, id);
       if (token) ctx.waitUntil(revokeToken(token));
-      return redirect(`/?msg=${encodeURIComponent(`${appName(env)} removed ${acct.email} and revoked its Google access.`)}`);
+      return redirect(withMessages("/", "removed"));
     }
     return redirect("/");
   }
@@ -386,13 +387,13 @@ async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: st
       replyToInvitations: selected("replyToInvitations"),
     },
   }, session.email);
-  return redirect(`/?msg=${encodeURIComponent(`${appName(env)} saved your changes.`)}`);
+  return redirect(withMessages("/", "saved"));
 }
 
 // ---------- context history ----------
 
-const historyUrl = (accountId: string, msg?: string) =>
-  `/accounts/${encodeURIComponent(accountId)}/context${msg ? `?msg=${encodeURIComponent(msg)}` : ""}`;
+const historyUrl = (accountId: string, ...messages: MessageCode[]) =>
+  withMessages(`/accounts/${encodeURIComponent(accountId)}/context`, ...messages);
 
 async function contextGet(req: Request, env: Env, app: string, id: string) {
   const session = await getUserSession(env, req);
@@ -408,28 +409,28 @@ async function contextGet(req: Request, env: Env, app: string, id: string) {
     selectedId: Number(url.searchParams.get("v")) || undefined,
     compare: compare === "text" || compare === "next" || compare === "current" ? compare : "previous",
     csrf: session.csrf,
-    flash: url.searchParams.get("msg") ?? undefined,
+    messages: messageCodes(url.searchParams.getAll("msg")),
   });
 }
 
-async function proposalPost(req: Request, env: Env, app: string, id: string, proposalId: number) {
+async function proposalPost(req: Request, env: Env, id: string, proposalId: number) {
   const session = await getUserSession(env, req);
   if (!session) return redirect("/");
   const f = await form(req);
-  if (!checkCsrf(f, session.csrf)) return redirect(historyUrl(id, "That form expired. Try again."));
+  if (!checkCsrf(f, session.csrf)) return redirect(historyUrl(id, "form-expired"));
   const accept = f.get("decision") === "accept";
   // The review form sends the text of the proposal, which the user can edit.
   const text = f.has("context") ? String(f.get("context")) : undefined;
   if (text !== undefined && text.replace(/\r\n/g, "\n").length > MAX_CONTEXT_CHARS) {
-    return redirect(historyUrl(id, `The context can have at most ${MAX_CONTEXT_CHARS} characters. ${app} did not save your edits.`));
+    return redirect(historyUrl(id, "context-too-long"));
   }
   const result = await decideProposal(env, session.userId, id, proposalId, { accept, editor: session.email, text });
   const messages = {
-    accepted: `${app} accepted the proposal. It is now the current context.`,
-    edited: `${app} accepted the proposal with your edits. Your edited text is now the current context.`,
-    rejected: `${app} rejected and deleted the proposal.`,
-    not_found: "That proposal does not exist, or it already has a decision.",
-  };
+    accepted: "accepted",
+    edited: "edited",
+    rejected: "rejected",
+    not_found: "proposal-not-found",
+  } satisfies Record<typeof result, MessageCode>;
   return redirect(historyUrl(id, messages[result]));
 }
 
@@ -444,17 +445,17 @@ async function previewPost(req: Request, env: Env, id: string) {
   return contextPreview(account.context, String(f.get("context") ?? ""));
 }
 
-async function restorePost(req: Request, env: Env, app: string, id: string, versionId: number) {
+async function restorePost(req: Request, env: Env, id: string, versionId: number) {
   const session = await getUserSession(env, req);
   if (!session) return redirect("/");
   const f = await form(req);
-  if (!checkCsrf(f, session.csrf)) return redirect(historyUrl(id, "That form expired. Try again."));
+  if (!checkCsrf(f, session.csrf)) return redirect(historyUrl(id, "form-expired"));
   const result = await restoreContextVersion(env, session.userId, id, versionId, session.email);
   const messages = {
-    restored: `${app} restored the version. It is now the current context.`,
-    unchanged: "That version has the same text as the current context. The context did not change.",
-    not_found: "That version does not exist.",
-  };
+    restored: "restored",
+    unchanged: "unchanged",
+    not_found: "version-not-found",
+  } satisfies Record<typeof result, MessageCode>;
   return redirect(historyUrl(id, messages[result]));
 }
 
