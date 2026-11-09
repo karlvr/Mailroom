@@ -20,6 +20,7 @@ import {
   adminLoginPage,
   consentPage,
   dashboardPage,
+  favicon,
   landingPage,
   messagePage,
   privacyPage,
@@ -102,6 +103,7 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
   const path = url.pathname;
   const method = req.method;
 
+  if (path === "/favicon.svg") return favicon();
   if (!env.ADMIN_PASSWORD) {
     return messagePage(
       app,
@@ -141,7 +143,7 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
 async function home(req: Request, env: Env, origin: string, app: string) {
   const cfg = await getGoogleConfig(env);
   const session = await getUserSession(env, req);
-  if (!cfg || !session) return landingPage(app, !!cfg);
+  if (!cfg || !session) return landingPage(app, origin, !!cfg);
   const flash = new URL(req.url).searchParams.get("msg") ?? undefined;
   const accounts = await listAccounts(env, session.userId);
   return dashboardPage(app, origin, session.email, accounts, session.csrf, flash);

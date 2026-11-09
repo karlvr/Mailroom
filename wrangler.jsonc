@@ -13,6 +13,9 @@
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
   "d1_databases": [{ "binding": "DB", "database_name": "mailroom" }],
 
+  // Static files that Cloudflare serves before the Worker runs: the IBM Plex fonts of the pages.
+  "assets": { "directory": "./public" },
+
   "vars": {
     "APP_NAME": "Mailroom"
   }
