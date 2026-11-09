@@ -5,12 +5,12 @@ export interface Env {
   OAUTH_KV: KVNamespace;
   /** Chosen at deploy time. Unlocks the setup page and protects stored tokens. */
   ADMIN_PASSWORD: string;
-  /** Optional display name shown in the UI and to Claude. */
+  /** Optional display name shown in the UI and to agents. */
   APP_NAME?: string;
   OAUTH_PROVIDER: OAuthHelpers;
 }
 
-/** What Claude's access token carries (set in completeAuthorization). */
+/** What the access token of an agent carries (set in completeAuthorization). */
 export interface Props {
   userId: string;
   email: string;

@@ -1,7 +1,7 @@
 {
   "name": "mailroom",
   "version": "0.1.0",
-  "description": "Self-hosted Cloudflare Worker that gives Claude access to multiple Gmail / Google Workspace mailboxes and their calendars.",
+  "description": "Self-hosted Cloudflare Worker that gives AI agents, such as Claude, ChatGPT and Codex, access to multiple Gmail / Google Workspace mailboxes and their calendars.",
   "scripts": {
     "dev": "wrangler d1 migrations apply DB --local && wrangler dev",
     "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy",

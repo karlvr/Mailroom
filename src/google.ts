@@ -162,7 +162,7 @@ async function accessToken(env: Env, account: Account): Promise<string> {
 
 const appUrlHint = "the Mailroom web page";
 
-/** An error response from a Google API. The message is safe to show to Claude. */
+/** An error response from a Google API. The message is safe to show to an agent. */
 export class GoogleApiError extends Error {
   constructor(
     public status: number,

@@ -17,14 +17,16 @@ export const RELEASE_NOTES: ReleaseDay[] = [
   {
     date: "2026-11-10",
     changes: [
-      "The Mailboxes page tells you when Claude must reconnect to get new tools.",
-      "Claude can tell you what changed, from these release notes.",
+      "You can connect Claude Code, Codex and ChatGPT, as well as Claude. The Connect an agent page has the steps.",
+      "The Mailboxes page shows each mailbox that still needs a name and context notes.",
+      "The Mailboxes page tells you when an agent must reconnect to get new tools.",
+      "An agent can tell you what changed, from these release notes.",
       "You can write a global context with notes that apply to every mailbox.",
-      "Claude can propose changes to a context. You accept, edit or reject each proposal.",
+      "An agent can propose changes to a context. You accept, edit or reject each proposal.",
       "Each context keeps a history, so you can compare and restore earlier versions.",
-      "Claude can forward an email, with its attachments, as a draft.",
-      "Two new settings for each mailbox let Claude send calendar invitations and reply to invitations.",
-      "Claude can read your Google Calendar, find free time, and create and change events. To add the calendar to a mailbox, click Re-link.",
+      "An agent can forward an email, with its attachments, as a draft.",
+      "Two new settings for each mailbox let agents send calendar invitations and reply to invitations.",
+      "An agent can read your Google Calendar, find free time, and create and change events. To add the calendar to a mailbox, click Re-link.",
     ],
   },
   {

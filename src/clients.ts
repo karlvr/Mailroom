@@ -23,19 +23,19 @@ export function clientHost(clientId: string | null): string | null {
   }
 }
 
-/** A Claude connection of a user: an OAuth client that has a live grant from the user. */
-export interface ClaudeConnection {
+/** An agent connection of a user: an OAuth client, such as Claude or Codex, that has a live grant from the user. */
+export interface AgentConnection {
   clientId: string;
   /** The name of the OAuth client, from its registration. */
   name: string;
 }
 
 /**
- * Returns the current Claude connections of the user. An app that registers again gets a new client
+ * Returns the current agent connections of the user. An app that registers again gets a new client
  * ID, and its old grant stays until it expires. So for each app, only the client with the newest live
  * grant is a current connection. An app is a client name and the host of its client ID.
  */
-export async function claudeConnections(env: Env, userId: string): Promise<ClaudeConnection[]> {
+export async function agentConnections(env: Env, userId: string): Promise<AgentConnection[]> {
   const now = Date.now() / 1000;
   // The time of the newest live grant of each client, in seconds.
   const grantedAt = new Map<string, number>();
@@ -49,7 +49,7 @@ export async function claudeConnections(env: Env, userId: string): Promise<Claud
     cursor = page.cursor;
   } while (cursor);
 
-  const newest = new Map<string, ClaudeConnection & { grantedAt: number }>();
+  const newest = new Map<string, AgentConnection & { grantedAt: number }>();
   for (const [clientId, at] of grantedAt) {
     const name = await clientName(env, clientId);
     const app = `${name}\n${clientHost(clientId) ?? ""}`;

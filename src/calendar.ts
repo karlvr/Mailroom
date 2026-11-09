@@ -62,7 +62,7 @@ export interface CalendarListEntry {
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
- * Returns the event time for a value from Claude. A date such as `2026-11-10` makes an all-day time.
+ * Returns the event time for a value from an agent. A date such as `2026-11-10` makes an all-day time.
  * Any other value is a date-time, which Google validates.
  */
 export function toEventTime(value: string, timeZone?: string): EventTime {

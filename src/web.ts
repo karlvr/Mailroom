@@ -37,6 +37,7 @@ import {
   PERMISSION_FIELDS,
   SETUP_VERSION,
   adminLoginPage,
+  connectPage,
   consentPage,
   contextHref,
   contextPage,
@@ -86,9 +87,9 @@ function cookie(req: Request, name: string): string | undefined {
 const setCookie = (name: string, value: string, maxAge: number) =>
   `${name}=${encodeURIComponent(value)}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
 
-/** Returns `path` with a `msg` parameter for each message that the page shows after the redirect. */
+/** Returns `path` with a `msg` parameter for each message that the page shows after the redirect. `path` can have a query. */
 const withMessages = (path: string, ...codes: MessageCode[]) =>
-  codes.length ? `${path}?${codes.map((c) => `msg=${encodeURIComponent(c)}`).join("&")}` : path;
+  codes.length ? `${path}${path.includes("?") ? "&" : "?"}${codes.map((c) => `msg=${encodeURIComponent(c)}`).join("&")}` : path;
 
 function redirect(location: string, cookies: string[] = []): Response {
   const headers = new Headers({ Location: location, "Cache-Control": "no-store" });
@@ -147,6 +148,7 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
     if (path === "/privacy" && method === "GET") return privacyPage(app, origin);
     if (path === "/terms" && method === "GET") return termsPage(app, origin);
     if (path === "/costs" && method === "GET") return costsPage(app);
+    if (path === "/connect" && method === "GET") return connectGet(req, env, origin, app);
     if (path === "/release-notes" && method === "GET") return releaseNotesPage(app);
     if (path === "/setup" && method === "GET") return setupGet(req, env, origin, app);
     if (path === "/setup/login" && method === "POST") return setupLogin(req, env, origin, app);
@@ -191,20 +193,28 @@ async function home(req: Request, env: Env, origin: string, app: string) {
   const cfg = await getGoogleConfig(env);
   const session = await getUserSession(env, req);
   if (!cfg || !session) return landingPage(app, origin, !!cfg);
-  const messages = messageCodes(new URL(req.url).searchParams.getAll("msg"));
+  const params = new URL(req.url).searchParams;
+  const messages = messageCodes(params.getAll("msg"));
   const accounts = await listAccounts(env, session.userId);
   const contexts = await contextSummaries(env, session.userId);
   const setupOutdated = (await getSetupVersion(env)) < SETUP_VERSION;
   // The warning is not essential, so the page shows without it when Mailroom cannot list the connections.
   const outdated = await outdatedConnections(env, session.userId).catch((e) => {
-    console.error("Mailroom could not list the outdated Claude connections", e);
+    console.error("Mailroom could not list the outdated agent connections", e);
     return [];
   });
-  return dashboardPage(app, origin, session.email, accounts, contexts, session.csrf, {
+  return dashboardPage(app, session.email, accounts, contexts, session.csrf, {
     messages,
     setupOutdated,
     outdatedConnections: outdated,
+    linkedMailbox: params.get("mailbox") ?? undefined,
   });
+}
+
+async function connectGet(req: Request, env: Env, origin: string, app: string) {
+  const session = await getUserSession(env, req);
+  if (!session) return redirect(`/login?next=${encodeURIComponent("/connect")}`);
+  return connectPage(app, origin, session.email);
 }
 
 async function setupGet(
@@ -376,13 +386,13 @@ async function googleCallback(req: Request, env: Env, origin: string, app: strin
       text: "Link again",
     });
   }
-  await saveLinkedAccount(env, session.userId, {
+  const accountId = await saveLinkedAccount(env, session.userId, {
     email: result.email,
     refreshToken: result.refreshToken,
     scopes: result.scopes,
   });
   const messages: MessageCode[] = hasCalendar(result.scopes) ? ["linked"] : ["linked", "no-calendar"];
-  return redirect(withMessages("/", ...messages), [clear]);
+  return redirect(withMessages(`/?mailbox=${encodeURIComponent(accountId)}`, ...messages), [clear]);
 }
 
 async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: string, remove: boolean) {
@@ -498,7 +508,7 @@ async function restorePost(req: Request, env: Env, subject: ContextSubject, vers
   return redirect(historyUrl(subject, messages[result]));
 }
 
-// ---------- OAuth for Claude (MCP clients) ----------
+// ---------- OAuth for agents (MCP clients) ----------
 
 async function authorize(req: Request, env: Env, app: string) {
   const session = await getUserSession(env, req);
@@ -506,7 +516,7 @@ async function authorize(req: Request, env: Env, app: string) {
   if (!session) {
     if (req.method !== "GET") return redirect("/");
     if (!(await getGoogleConfig(env))) {
-      return messagePage(app, "Setup is not complete", "Complete the setup page before you connect Claude.", {
+      return messagePage(app, "Setup is not complete", "Complete the setup page before you connect an agent.", {
         href: "/setup",
         text: "Open the setup page",
       });

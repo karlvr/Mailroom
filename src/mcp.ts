@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { type ClaudeConnection, UNKNOWN_CLIENT, claudeConnections, clientName } from "./clients";
+import { type AgentConnection, UNKNOWN_CLIENT, agentConnections, clientName } from "./clients";
 import { sha256 } from "./crypto";
 import { appName, type Env, type Props } from "./env";
 import {
@@ -266,8 +266,8 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
         ...(upToDate === false
           ? {
               notice:
-                `${appName(env)} changed its tools since Claude loaded them. Tell the user to reconnect ${appName(env)} to get the new tools: ` +
-                `in Claude, open Customize → Connectors, disconnect ${appName(env)}, and then connect it again. ` +
+                `${appName(env)} changed its tools after your app loaded them. Tell the user to reconnect ${appName(env)} in the app ` +
+                `to get the new tools. The steps for each app are at ${origin}/connect#new-tools. ` +
                 `To read what changed, call about_mailroom if you have it, or open ${origin}/release-notes.`,
             }
           : {}),
@@ -484,8 +484,8 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
         `Read about ${appName(env)}: its release notes, the names of its current tools, and whether your tool list is up to date. ` +
         `Call this tool when the user asks about ${appName(env)} or what changed in it, when list_accounts gives a notice, ` +
         "or when you need a tool that you do not have. Tell the user about the changes briefly, in plain words. " +
-        "When tools_up_to_date is false, Claude has an old tool list. Then tell the user to reconnect: " +
-        `in Claude, open Customize → Connectors, disconnect ${appName(env)}, and then connect it again.`,
+        "When tools_up_to_date is false, your app has an old tool list. Then tell the user to reconnect " +
+        `${appName(env)} in the app. The steps for each app are at connect_page.`,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
@@ -494,6 +494,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
         app: appName(env),
         web_page: origin,
         release_notes_page: `${origin}/release-notes`,
+        connect_page: `${origin}/connect`,
         tools_up_to_date: upToDate,
         tools: catalog.names,
         release_notes: RELEASE_NOTES.slice(0, MAX_RELEASE_DAYS),
@@ -1249,8 +1250,8 @@ export async function handleMcp(req: Request, env: Env, caller: McpCaller): Prom
     // No server-initiated streams or sessions in stateless mode.
     return new Response(null, { status: 405, headers: { Allow: "POST" } });
   }
-  // Claude keeps the tool list from the time that it connected. Record the tool list that each client
-  // loads, so that Mailroom can find the clients that must reconnect to get new tools.
+  // An agent app keeps the tool list from the time that it connected. Record the tool list that each
+  // client loads, so that Mailroom can find the clients that must reconnect to get new tools.
   const listingClient = caller.clientId !== null && (await isToolListRequest(req)) ? caller.clientId : null;
   const transport = await connectedTransport(env, caller, new URL(req.url).origin);
   const res = await transport.handleRequest(req);
@@ -1279,7 +1280,7 @@ async function isToolListRequest(req: Request): Promise<boolean> {
   }
 }
 
-/** The tool list of this version of Mailroom, as Claude gets it when it connects. */
+/** The tool list of this version of Mailroom, as an agent gets it when it connects. */
 export interface ToolCatalog {
   /** The names of the tools. */
   names: string[];
@@ -1332,14 +1333,14 @@ async function makeCatalog(env: Env): Promise<ToolCatalog> {
 }
 
 /**
- * Returns the current Claude connections of the user that do not have the current tool list: each one
+ * Returns the current agent connections of the user that do not have the current tool list: each one
  * loaded an older tool list, or Mailroom has no record of its tool list.
  */
-export async function outdatedConnections(env: Env, userId: string): Promise<ClaudeConnection[]> {
+export async function outdatedConnections(env: Env, userId: string): Promise<AgentConnection[]> {
   const [catalog, loaded, connections] = await Promise.all([
     toolCatalog(env),
     loadedToolLists(env, userId),
-    claudeConnections(env, userId),
+    agentConnections(env, userId),
   ]);
   return connections.filter((c) => loaded.get(c.clientId) !== catalog.fingerprint);
 }

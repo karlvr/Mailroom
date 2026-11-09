@@ -95,7 +95,7 @@ export async function upsertUser(env: Env, id: string, email: string): Promise<v
 
 // ---------- tool lists ----------
 
-/** Records that a Claude connection of the user, identified by its OAuth client ID, loaded the tool list with `fingerprint`. */
+/** Records that an agent connection of the user, identified by its OAuth client ID, loaded the tool list with `fingerprint`. */
 export async function recordToolList(env: Env, userId: string, clientId: string, fingerprint: string): Promise<void> {
   await env.DB.prepare(
     `INSERT INTO tool_lists (user_id, client_id, fingerprint, listed_at) VALUES (?, ?, ?, ?)
@@ -105,7 +105,7 @@ export async function recordToolList(env: Env, userId: string, clientId: string,
     .run();
 }
 
-/** Returns the fingerprint of the tool list that each Claude connection of the user loaded last, by OAuth client ID. */
+/** Returns the fingerprint of the tool list that each agent connection of the user loaded last, by OAuth client ID. */
 export async function loadedToolLists(env: Env, userId: string): Promise<Map<string, string>> {
   const { results } = await env.DB.prepare("SELECT client_id, fingerprint FROM tool_lists WHERE user_id = ?")
     .bind(userId)
@@ -123,11 +123,11 @@ export interface Account {
   context: string;
   status: string;
   status_detail: string | null;
-  /** 1 when the owner allows Claude to send email from this mailbox, otherwise 0. */
+  /** 1 when the owner allows agents to send email from this mailbox, otherwise 0. */
   allow_send: number;
-  /** 1 when the owner allows Claude to send calendar invitations from this account, otherwise 0. */
+  /** 1 when the owner allows agents to send calendar invitations from this account, otherwise 0. */
   allow_invite: number;
-  /** 1 when the owner allows Claude to reply to calendar invitations for this account, otherwise 0. */
+  /** 1 when the owner allows agents to reply to calendar invitations for this account, otherwise 0. */
   allow_reply: number;
   /** The Google permissions that the stored refresh token grants, separated by spaces. Null for an account linked before Mailroom recorded them. */
   scopes: string | null;
@@ -140,11 +140,11 @@ export interface Account {
  * and each one is off until the owner allows it.
  */
 export interface AccountPermissions {
-  /** True when Claude may send email from this mailbox. */
+  /** True when agents may send email from this mailbox. */
   sendEmail: boolean;
-  /** True when Claude may invite guests to events, and change or delete events that have other guests. */
+  /** True when agents may invite guests to events, and change or delete events that have other guests. */
   sendInvitations: boolean;
-  /** True when Claude may accept, decline or tentatively accept invitations. */
+  /** True when agents may accept, decline or tentatively accept invitations. */
   replyToInvitations: boolean;
 }
 
@@ -169,7 +169,7 @@ export function grantedScopes(a: Account): string[] {
 export interface AccountDetails {
   /** A short name for the mailbox. */
   name: string;
-  /** Notes for Claude about the purpose of the mailbox and how to treat it. */
+  /** Notes for agents about the purpose of the mailbox and how to treat it. */
   context: string;
   permissions: AccountPermissions;
 }
@@ -203,19 +203,23 @@ export async function findAccount(env: Env, userId: string, ref: string): Promis
     .first<Account>();
 }
 
-export async function saveLinkedAccount(env: Env, userId: string, link: LinkedGoogleAccount): Promise<void> {
+/** Saves a linked Google account, or updates the access of an account that the user linked before. Returns the ID of the account. */
+export async function saveLinkedAccount(env: Env, userId: string, link: LinkedGoogleAccount): Promise<string> {
   const now = Date.now();
   const id = randomToken(9);
   const enc = await encrypt(await dataKey(env), link.refreshToken, `refresh:${userId}:${link.email.toLowerCase()}`);
-  await env.DB.prepare(
+  const row = await env.DB.prepare(
     `INSERT INTO accounts (id, user_id, email, name, context, refresh_token, scopes, status, created_at, updated_at)
      VALUES (?, ?, ?, '', '', ?, ?, 'ok', ?, ?)
      ON CONFLICT(user_id, email) DO UPDATE SET
        refresh_token = excluded.refresh_token, scopes = excluded.scopes, status = 'ok', status_detail = NULL,
-       updated_at = excluded.updated_at`,
+       updated_at = excluded.updated_at
+     RETURNING id`,
   )
     .bind(id, userId, link.email, enc, link.scopes.join(" "), now, now)
-    .run();
+    .first<{ id: string }>();
+  if (!row) throw new Error("The database did not return the ID of the linked account.");
+  return row.id;
 }
 
 export async function getRefreshToken(env: Env, account: Account): Promise<string> {

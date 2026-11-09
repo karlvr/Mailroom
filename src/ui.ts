@@ -12,7 +12,7 @@ import {
   grantedScopes,
 } from "./db";
 import { diffWords } from "./diff";
-import { type ClaudeConnection, clientHost } from "./clients";
+import { type AgentConnection, clientHost } from "./clients";
 import { RELEASE_NOTES } from "./release-notes";
 import { hasCalendar } from "./google";
 
@@ -446,7 +446,7 @@ ${Object.values(APP_ICONS)
 <main class="${opts.width ?? "text"}">
 ${body}
 </main>
-<footer class="foot"><div><span>${app} is a self-hosted mailbox and calendar connector for Claude. Claude can send email and calendar invitations only from an account where you allow it.</span><span><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/costs">Costs</a> · <a href="/release-notes">Release notes</a> · <a href="/setup">Admin setup</a></span></div></footer>
+<footer class="foot"><div><span>${app} is a self-hosted mailbox and calendar connector for AI agents. An agent can send email and calendar invitations only from an account where you allow it.</span><span><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/costs">Costs</a> · <a href="/release-notes">Release notes</a> · <a href="/setup">Admin setup</a></span></div></footer>
 </div><script>${COPY_JS};${TIME_JS}</script></body></html>`;
   return new Response(html, {
     headers: {
@@ -503,11 +503,11 @@ const MESSAGES = {
   saved: { kind: "done", html: (a) => `${a} saved your changes.` },
   linked: {
     kind: "done",
-    html: (a) => `${a} linked the mailbox. Give it a short name and context notes. ${a} instructs Claude to read them before it works in that mailbox.`,
+    html: (a) => `${a} linked the mailbox.`,
   },
   "no-calendar": {
     kind: "warning",
-    html: (a) => `${a} did not get the Calendar permissions, so Claude cannot use the calendar of this mailbox. To add the calendar, click <b>Re-link</b> and keep the Calendar check boxes selected.`,
+    html: (a) => `${a} did not get the Calendar permissions, so agents cannot use the calendar of this mailbox. To add the calendar, click <b>Re-link</b> and keep the Calendar check boxes selected.`,
   },
   removed: { kind: "done", html: (a) => `${a} removed the mailbox and revoked its Google access.` },
   "form-expired": { kind: "error", html: () => "That form expired. Try again." },
@@ -738,7 +738,7 @@ export function landingPage(app: string, origin: string, configured: boolean) {
 <div>
 <span class="chip"><b>MCP</b><i></i>Gmail and Google Workspace</span>
 <h1>All your mailboxes.<br>Each with its own context.</h1>
-<p class="lede">${a} is a self-hosted connector for Claude. Claude can search, read, label, draft and trash email in each Gmail and Workspace mailbox that you link. Claude can also read its calendar, find free time and schedule events.</p>
+<p class="lede">${a} is a self-hosted connector for AI agents, such as Claude, ChatGPT and Codex. An agent can search, read, label, draft and trash email in each Gmail and Workspace mailbox that you link. An agent can also read its calendar, find free time and schedule events.</p>
 ${
   configured
     ? `<div class="row"><a class="btn big" href="/login">Sign in with Google${ICON.arrow}</a><a class="btn big secondary" href="/setup">Admin setup</a></div>
@@ -750,7 +750,7 @@ ${
 <figure class="panel raised ticks accent fig">
 <figcaption class="cap label"><span><span class="hot">Fig. 01</span> How it connects</span><span>Example</span></figcaption>
 <div class="body">
-<div class="node"><span class="ico">${ICON.client}</span><span><span class="k">Client</span><b>Claude</b></span></div>
+<div class="node"><span class="ico">${ICON.client}</span><span><span class="k">Agent</span><b>Claude, ChatGPT, Codex</b></span></div>
 <span class="wire"></span><span class="via">MCP · OAuth · /mcp</span><span class="wire"></span>
 <div class="node hub">${mark(30)}<span><span class="k">Your Worker</span><b>${a}</b></span></div>
 <span class="wire"></span>
@@ -762,8 +762,8 @@ ${
 <div class="facts">
 ${fact(1, "Hosting", `${a} runs on the Cloudflare account of the person or organisation that deployed it.`)}
 ${fact(2, "Credentials", `${a} encrypts the Google tokens that it stores. The operator of this ${a} can decrypt the tokens, so you must trust the operator. Read the <a href="/privacy">privacy policy</a>.`)}
-${fact(3, "Sending", `Claude can send email, send calendar invitations and reply to invitations only from an account where you allow it. Claude cannot delete email permanently.`)}
-${fact(4, "Content", `${a} instructs Claude to treat email and calendar content as data, never as instructions.`)}
+${fact(3, "Sending", `An agent can send email, send calendar invitations and reply to invitations only from an account where you allow it. An agent cannot delete email permanently.`)}
+${fact(4, "Content", `${a} instructs agents to treat email and calendar content as data, never as instructions.`)}
 </div>`,
     { app, width: "wide", backdrop: "envelope", aside: `<span class="live">${esc(new URL(origin).host)}</span>` },
   );
@@ -774,18 +774,18 @@ export function privacyPage(app: string, origin: string) {
   return page(
     "Privacy policy",
     `<h1>Privacy policy</h1>
-<p class="lede">This policy applies to ${a} at <b>${esc(new URL(origin).host)}</b>. ${a} connects Gmail and Google Workspace mailboxes and calendars to Claude. The person or organisation that deployed ${a} operates it. Cloudflare hosts it.</p>
+<p class="lede">This policy applies to ${a} at <b>${esc(new URL(origin).host)}</b>. ${a} connects Gmail and Google Workspace mailboxes and calendars to the AI agents that you connect, such as Claude, ChatGPT and Codex. The person or organisation that deployed ${a} operates it. Cloudflare hosts it.</p>
 ${section(
   `Data that ${a} stores`,
   `<ul><li>Your Google account ID, your email address, your global context, and the times of your first and last sign-in.</li>
 <li>For each mailbox that you link: its address, its short name, its context notes, the settings <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.replyToInvitations)}</b>, the Google permissions that you granted, and a Google refresh token. ${a} encrypts the token before it stores it.</li>
 <li>For your global context and for each mailbox: each version of the context notes that you saved or accepted, when the version became current, and who made it. For a change that an agent proposed, ${a} also stores the name of the app, and the name and the reason that the agent gave. ${a} deletes a proposal when you reject it.</li>
-<li>Your web session, and a record of each Claude connection that you approve.</li></ul>
+<li>Your web session, a record of each agent connection that you approve, and the version of the tool list that each connection loaded last.</li></ul>
 <p>${a} does not store the content of your email or your calendar events.</p>`,
 )}
 ${section(
   `How ${a} uses your Google data`,
-  `<p>${a} uses Google sign-in to get your verified email address. ${a} uses the Gmail API and the Google Calendar API only when Claude calls one of the ${a} tools. ${a} then sends the result to Claude through the connection that you approved.</p>
+  `<p>${a} uses Google sign-in to get your verified email address. ${a} uses the Gmail API and the Google Calendar API only when an agent calls one of the ${a} tools. ${a} then sends the result to that agent through the connection that you approved.</p>
 <p>The tools can search, read, label and trash email, and save drafts of new messages, replies and forwards. ${a} sends email only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendEmail)}</b>.</p>
 <p>The tools can read calendars, find free time, and create, change and delete events. ${a} sends calendar invitations only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b>. ${a} replies to invitations only for a mailbox where you select <b>${esc(PERMISSION_LABELS.replyToInvitations)}</b>.</p>
 <p>${a} does not sell your data. ${a} does not use your data for advertising or to train AI models.</p>
@@ -794,7 +794,7 @@ ${section(
 ${section(
   "Who receives your data",
   `<ul><li><b>Google</b> supplies the sign-in, the Gmail API and the Google Calendar API. Your email stays in Gmail, and your events stay in Google Calendar.</li>
-<li><b>Anthropic</b> receives the email and calendar data that ${a} sends to Claude. The <a href="https://www.anthropic.com/legal/privacy" target="_blank" rel="noopener">Anthropic privacy policy</a> and your Claude settings apply to that data.</li>
+<li><b>The provider of each agent that you connect</b> receives the email and calendar data that ${a} sends to that agent. For Claude and Claude Code, the provider is <b>Anthropic</b>, and the <a href="https://www.anthropic.com/legal/privacy" target="_blank" rel="noopener">Anthropic privacy policy</a> and your Claude settings apply to that data. For ChatGPT and Codex, the provider is <b>OpenAI</b>, and the <a href="https://openai.com/policies/privacy-policy/" target="_blank" rel="noopener">OpenAI privacy policy</a> and your ChatGPT settings apply to that data. For another app, the privacy policy of its provider applies.</li>
 <li><b>Cloudflare</b> runs ${a} and stores its data. Cloudflare can keep request logs.</li></ul>
 <p>${a} does not send your data to other parties.</p>`,
 )}
@@ -806,7 +806,7 @@ ${section(
 ${section(
   "Remove your data",
   `<ul><li>To unlink a mailbox, click <b>Remove</b> on the ${a} home page. ${a} deletes the stored token and the context history, and revokes the Google access of that mailbox.</li>
-<li>To stop the access of Claude, remove the ${a} connector in Claude.</li>
+<li>To stop the access of an agent, remove the ${a} connector in the app of that agent.</li>
 <li>You can also revoke the access of ${a} on the <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">third-party connections</a> page of your Google account.</li>
 <li>To delete all your data, contact the operator of ${a}.</li></ul>`,
 )}
@@ -830,12 +830,12 @@ ${section(
 )}
 ${section(
   "Your instructions",
-  `<p>Claude uses ${a} when you instruct it. You are responsible for your instructions and for the actions that Claude does because of them. Select <b>${esc(PERMISSION_LABELS.sendEmail)}</b> only for a mailbox where you accept that Claude can send email. Select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.replyToInvitations)}</b> only for a mailbox where you accept that Claude can send calendar invitations and replies.</p>
-<p>${a} instructs Claude to treat email and calendar content as data, never as instructions. This instruction reduces the risk that an email or an event tricks Claude, but it cannot remove the risk.</p>`,
+  `<p>An agent uses ${a} when you instruct it. You are responsible for your instructions and for the actions that an agent does because of them. Select <b>${esc(PERMISSION_LABELS.sendEmail)}</b> only for a mailbox where you accept that an agent can send email. Select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.replyToInvitations)}</b> only for a mailbox where you accept that an agent can send calendar invitations and replies.</p>
+<p>${a} instructs agents to treat email and calendar content as data, never as instructions. This instruction reduces the risk that an email or an event tricks an agent, but it cannot remove the risk.</p>`,
 )}
 ${section(
   "No warranty",
-  `<p>The operator supplies ${a} “as is”, without warranty of any kind. To the extent that the law permits, the operator is not liable for loss or damage from the use of ${a}. This includes email that Claude sends, labels or trashes, and calendar events that Claude creates, changes, deletes or replies to.</p>`,
+  `<p>The operator supplies ${a} “as is”, without warranty of any kind. To the extent that the law permits, the operator is not liable for loss or damage from the use of ${a}. This includes email that an agent sends, labels or trashes, and calendar events that an agent creates, changes, deletes or replies to.</p>`,
 )}
 ${section(
   "Changes",
@@ -893,7 +893,7 @@ export function releaseNotesPage(app: string) {
   return page(
     "Release notes",
     `<h1>Release notes</h1>
-<p class="lede">The changes to ${a} that you need to know about, newest first. When a change adds tools, Claude gets the new tools only after you reconnect ${a}. In Claude, open <b>Customize → Connectors</b>, disconnect ${a}, and then connect it again.</p>
+<p class="lede">The changes to ${a} that you need to know about, newest first. When a change adds tools, an agent gets the new tools only after you reconnect ${a} in its app. <a href="/connect#new-tools">How to reconnect</a></p>
 ${RELEASE_NOTES.map((d) =>
   section(esc(day(d.date)), `<ul>${d.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>`),
 ).join("\n")}`,
@@ -1000,8 +1000,8 @@ editButton.addEventListener('click',()=>{show('edit');tabs.parentElement.scrollI
 show('diff');
 })`;
 
-/** Returns a warning that names the Claude connections with an old tool list, or nothing when there are none. */
-function outdatedHtml(app: string, connections: readonly ClaudeConnection[]): string {
+/** Returns a warning that names the agent connections with an old tool list, or nothing when there are none. */
+function outdatedHtml(app: string, connections: readonly AgentConnection[]): string {
   if (!connections.length) return "";
   const a = esc(app);
   const names = connections
@@ -1010,9 +1010,9 @@ function outdatedHtml(app: string, connections: readonly ClaudeConnection[]): st
       return `<b>${esc(c.name)}</b>${host ? ` (${esc(host)})` : ""}`;
     })
     .join(", ");
-  const which = connections.length === 1 ? "This Claude connection has" : "These Claude connections have";
+  const which = connections.length === 1 ? "This agent connection has" : "These agent connections have";
   return warning(
-    `${a} has new or changed tools. ${which} the old tools: ${names}. To get the new tools, reconnect ${a}: in Claude, open <b>Customize → Connectors</b>, disconnect ${a}, and then connect it again. <a href="/release-notes">See what changed</a>`,
+    `${a} has new or changed tools. ${which} the old tools: ${names}. To get the new tools, reconnect ${a} in the app. <a href="/connect#new-tools">How to reconnect</a> · <a href="/release-notes">What changed</a>`,
   );
 }
 
@@ -1027,9 +1027,20 @@ function contextMeta(subject: ContextSubject, summary: ContextSummary | null | u
 const proposalBand = (subject: ContextSubject) =>
   `<div class="band"><span class="label">Proposal waiting</span><p>An agent proposed a change to the context. The context changes only when you accept it.</p><a class="btn" href="${contextHref(subject)}#proposal">Review the proposal${ICON.arrow}</a></div>`;
 
+/** Returns the navigation of the pages for a signed-in user. `current` is the page that shows it, if it is one of them. */
+const userNav = (current?: "mailboxes" | "connect"): NavLink[] => [
+  { href: "/", text: "Mailboxes", current: current === "mailboxes" },
+  { href: "/connect", text: "Connect an agent", current: current === "connect" },
+];
+
+/** Returns the start of a context for a one-line preview. */
+function contextPreviewLine(context: string): string {
+  const line = context.split("\n").find((l) => l.trim())?.trim() ?? "";
+  return line.length > 90 ? `${line.slice(0, 90)}…` : line;
+}
+
 export function dashboardPage(
   app: string,
-  origin: string,
   who: string,
   accounts: Account[],
   contexts: ContextSummaries,
@@ -1039,16 +1050,19 @@ export function dashboardPage(
     messages?: readonly MessageCode[];
     /** True when this version has setup steps that the admin did not complete. */
     setupOutdated?: boolean;
-    /** The Claude connections that do not have the current tool list. */
-    outdatedConnections?: readonly ClaudeConnection[];
+    /** The agent connections that do not have the current tool list. */
+    outdatedConnections?: readonly AgentConnection[];
+    /** The ID of the mailbox that the user linked a moment ago. The page puts the cursor in its first empty field. */
+    linkedMailbox?: string;
   } = {},
 ) {
   const a = esc(app);
-  const mcpUrl = `${origin}/mcp`;
   const subject = (m: Account): ContextSubject => ({ kind: "account", accountId: m.id });
   const hasProposal = (m: Account) => contexts.accounts.get(m.id)?.hasProposal ?? false;
-  // Each mailbox starts collapsed, unless it is the only one or it still needs a name or context notes.
-  const opened = (m: Account) => accounts.length === 1 || !m.name || !m.context;
+  /** Returns true when a mailbox has no short name or no context notes. */
+  const needsSetup = (m: Account) => !m.name || !m.context;
+  // Each mailbox starts collapsed, unless it is the only one or it needs setup.
+  const opened = (m: Account) => accounts.length === 1 || needsSetup(m);
   const can = (text: string) => `<div class="r"><span>${text}</span><span class="v">${ICON.check}Allowed</span></div>`;
   /** The short text of the pill that shows that a permission is on. */
   const permissionPills: Record<keyof AccountPermissions, string> = {
@@ -1057,9 +1071,9 @@ export function dashboardPage(
     replyToInvitations: "Replies on",
   };
   const permissionHelp: Record<keyof AccountPermissions, string> = {
-    sendEmail: "Claude can send email from this mailbox.",
-    sendInvitations: "Claude can invite guests to events, and change or delete events that have other guests. Google emails each guest.",
-    replyToInvitations: "Claude can accept, decline or tentatively accept invitations. Google tells the organizer.",
+    sendEmail: "Agents can send email from this mailbox.",
+    sendInvitations: "Agents can invite guests to events, and change or delete events that have other guests. Google emails each guest.",
+    replyToInvitations: "Agents can accept, decline or tentatively accept invitations. Google tells the organizer.",
   };
   const permissionKeys = Object.keys(PERMISSION_FIELDS) as (keyof AccountPermissions)[];
   const acct = (m: Account, i: number) => {
@@ -1067,6 +1081,8 @@ export function dashboardPage(
     const relink = `/accounts/link?hint=${encodeURIComponent(m.email)}`;
     const permissions = accountPermissions(m);
     const calendar = hasCalendar(grantedScopes(m));
+    // After a link, the cursor goes to the first empty field of the new mailbox.
+    const focus = m.id === notices.linkedMailbox ? (m.name ? "context" : "name") : null;
     const onPills = permissionKeys
       .filter((k) => permissions[k])
       .map((k) => `<span class="pill send">${ICON.send}${permissionPills[k]}</span>`)
@@ -1076,12 +1092,12 @@ export function dashboardPage(
       return `<label class="toggle" for="${field}-${id}">${esc(PERMISSION_LABELS[k])}<input id="${field}-${id}" type="checkbox" name="${field}" value="1"${permissions[k] ? " checked" : ""}></label>
 <p class="help">${permissionHelp[k]}</p>`;
     };
-    return `<details class="mbx"${opened(m) ? " open" : ""}>
+    return `<details class="mbx" id="mbx-${id}"${opened(m) ? " open" : ""}>
 <summary><span class="id${m.status === "ok" ? "" : " warn"}">${mailboxId(i + 1)}</span>
 <span class="who"><b>${esc(m.name || m.email)}</b>${m.name ? `<span>${esc(m.email)}</span>` : ""}</span>
-<span class="pills">${m.status === "ok" ? `<span class="pill ok">Linked</span>` : `<span class="pill warn">${ICON.warn}Needs re-linking</span>`}${
-      calendar ? `<span class="pill ok">Calendar</span>` : `<span class="pill">No calendar</span>`
-    }${onPills || `<span class="pill">Sending off</span>`}${
+<span class="pills">${needsSetup(m) ? `<span class="pill warn">Needs setup</span>` : ""}${
+      m.status === "ok" ? `<span class="pill ok">Linked</span>` : `<span class="pill warn">${ICON.warn}Needs re-linking</span>`
+    }${calendar ? `<span class="pill ok">Calendar</span>` : `<span class="pill">No calendar</span>`}${onPills || `<span class="pill">Sending off</span>`}${
       hasProposal(m) ? `<span class="pill warn">Context proposal</span>` : ""
     }</span>
 <span class="chev">${ICON.chevron}</span></summary>
@@ -1091,13 +1107,13 @@ ${m.status !== "ok" ? warning(`${esc(m.status_detail || "Google access stopped w
 <form method="post" action="/accounts/${id}">
 <input type="hidden" name="csrf" value="${esc(csrf)}">
 <div class="cols"><div class="fields">
-<label for="name-${id}">Short name <span class="hint">Claude uses this name for the mailbox</span></label>
-<input id="name-${id}" type="text" name="name" value="${esc(m.name)}" placeholder="For example, Support">
-<label for="context-${id}">Context for Claude <span class="hint">Takes precedence over the global context</span></label>
-<textarea id="context-${id}" name="context" placeholder="What this mailbox is for, who matters, what's urgent, what to ignore, how to sign replies…">${esc(m.context)}</textarea>
+<label for="name-${id}">Short name <span class="hint">Agents use this name for the mailbox</span></label>
+<input id="name-${id}" type="text" name="name" value="${esc(m.name)}" placeholder="For example, Support"${focus === "name" ? " autofocus" : ""}>
+<label for="context-${id}">Context for agents <span class="hint">Takes precedence over the global context</span></label>
+<textarea id="context-${id}" name="context" placeholder="What this mailbox is for, who matters, what's urgent, what to ignore, how to sign replies…"${focus === "context" ? " autofocus" : ""}>${esc(m.context)}</textarea>
 ${contextMeta(subject(m), contexts.accounts.get(m.id), who)}
 </div>
-<div class="caps"><div class="label">What Claude can do here</div>
+<div class="caps"><div class="label">What agents can do here</div>
 ${can("Search and read email")}${can("Add and remove labels")}${can("Save drafts and forwards")}${can("Move threads to the trash")}
 ${
   calendar
@@ -1105,13 +1121,46 @@ ${
     : `<div class="r no"><span>Calendar is not linked. To add it, click <b>Re-link</b> and keep the Calendar check boxes selected.</span><span class="v">${ICON.cross}Off</span></div>`
 }
 <div class="send">${permissionKeys.map(toggle).join("\n")}
-<p class="help">${a} instructs Claude to do these actions only when you instruct it, never because an email or an event requests it. This instruction reduces the risk that an email or an event tricks Claude, but it cannot remove the risk.</p></div>
+<p class="help">${a} instructs agents to do these actions only when you instruct them, never because an email or an event requests it. This instruction reduces the risk that an email or an event tricks an agent, but it cannot remove the risk.</p></div>
 <div class="r no"><span>Delete email permanently</span><span class="v">${ICON.cross}Never</span></div>
 </div></div>
 <div class="actions"><div class="row"><button>Save</button><a class="btn secondary" href="${relink}">Re-link</a></div>
 <button class="danger" formaction="/accounts/${id}/remove" onclick="return confirm('Remove ${esc(m.email)}? This also revokes its Google access.')">Remove</button></div>
 </form></div></details>`;
   };
+
+  const unset = accounts.filter(needsSetup);
+  const setupBanner = unset.length
+    ? `<div class="notice info"><span>${unset.length === 1 ? "This mailbox needs" : "These mailboxes need"} a short name and context notes: ${unset
+        .map((m) => `<a href="#mbx-${esc(m.id)}">${esc(m.name || m.email)}</a>`)
+        .join(", ")}. ${a} instructs agents to read them before they work in a mailbox.</span></div>`
+    : "";
+
+  const global = contexts.global;
+  const globalPreview = contextPreviewLine(global.context);
+  const globalHtml = `<details class="mbx" id="global-context">
+<summary><span class="id">ALL</span>
+<span class="who"><b>Global context</b><span>${globalPreview ? esc(globalPreview) : "Empty. Add the notes that apply to every mailbox."}</span></span>
+<span class="pills">${global.summary?.hasProposal ? `<span class="pill warn">Context proposal</span>` : ""}</span>
+<span class="chev">${ICON.chevron}</span></summary>
+<div class="body">
+${global.summary?.hasProposal ? proposalBand(GLOBAL_CONTEXT) : ""}
+<form method="post" action="${contextHref(GLOBAL_CONTEXT)}">
+<input type="hidden" name="csrf" value="${esc(csrf)}">
+<div class="cols"><div class="fields">
+<label for="context-global">Global context for agents <span class="hint">Applies to every mailbox</span></label>
+<textarea id="context-global" name="context" placeholder="Who you are, what you work on, your priorities, how you write…">${esc(global.context)}</textarea>
+${contextMeta(GLOBAL_CONTEXT, global.summary, who)}
+</div>
+<div class="caps"><div class="label">How agents use it</div>
+<div class="r"><span>Agents follow the global context in every mailbox.</span></div>
+<div class="r"><span>Where the context of a mailbox conflicts with the global context, agents follow the context of the mailbox.</span></div>
+<div class="r"><span>Put notes about one mailbox in the context of that mailbox.</span></div>
+<div class="r"><span>An agent can only propose a change. The global context changes only when you accept it.</span></div>
+</div></div>
+<div class="actions"><div class="row"><button>Save</button></div></div>
+</form></div></details>`;
+
   return page(
     "Mailboxes",
     `${messagePanels(app, notices.messages ?? [])}
@@ -1121,68 +1170,116 @@ ${
     : ""
 }
 ${outdatedHtml(app, notices.outdatedConnections ?? [])}
-<section class="sect" id="global">
-<div class="rule"><span class="n">01</span><span>Global context</span><span class="end">Every mailbox</span></div>
-<div class="panel raised ticks">
-${contexts.global.summary?.hasProposal ? proposalBand(GLOBAL_CONTEXT) : ""}
-<form method="post" action="${contextHref(GLOBAL_CONTEXT)}">
-<input type="hidden" name="csrf" value="${esc(csrf)}">
-<div class="cols"><div class="fields">
-<label for="context-global">Global context for Claude <span class="hint">Applies to every mailbox</span></label>
-<textarea id="context-global" name="context" placeholder="Who you are, what you work on, your priorities, how you write…">${esc(contexts.global.context)}</textarea>
-${contextMeta(GLOBAL_CONTEXT, contexts.global.summary, who)}
-</div>
-<div class="caps"><div class="label">How Claude uses it</div>
-<div class="r"><span>Claude follows the global context in every mailbox.</span></div>
-<div class="r"><span>Where the context of a mailbox conflicts with the global context, Claude follows the context of the mailbox.</span></div>
-<div class="r"><span>Put notes about one mailbox in the context of that mailbox.</span></div>
-<div class="r"><span>An agent can only propose a change. The global context changes only when you accept it.</span></div>
-</div></div>
-<div class="actions"><div class="row"><button>Save</button></div></div>
-</form></div>
-</section>
-
+${setupBanner}
 <section class="sect" id="mailboxes">
-<div class="rule"><span class="n">02</span><span>Mailboxes</span><span class="end">${accounts.length} linked</span></div>
+<div class="rule"><span class="n">01</span><span>Mailboxes</span><span class="end">${accounts.length} linked</span></div>
 <div class="title"><div><h1>Your mailboxes</h1>
-<p class="lede">Link each Gmail or Workspace mailbox. Claude can use these mailboxes and their calendars only through ${a}. Claude can label, draft and trash email, and create and change events. Claude can send email, send calendar invitations and reply to invitations only where you allow it.</p></div>
-<a class="btn" href="/accounts/link">${ICON.plus}Link a mailbox</a></div>
+<p class="lede">Link each Gmail or Workspace mailbox. Agents can use these mailboxes and their calendars only through ${a}. Agents can label, draft and trash email, and create and change events. Agents can send email, send calendar invitations and reply to invitations only where you allow it.</p></div>
+<div class="row"><a class="btn" href="/accounts/link">${ICON.plus}Link a mailbox</a><a class="btn secondary" href="/connect">Connect an agent</a></div></div>
 <div class="panel raised ticks register">${
       accounts.length
-        ? `${accounts.map(acct).join("")}<p class="note">${a} instructs Claude to read the global context and the context notes of a mailbox before it works in that mailbox.</p>`
+        ? `${accounts.map(acct).join("")}<p class="note">${a} instructs agents to read the global context and the context notes of a mailbox before they work in that mailbox.</p>`
         : `<div class="empty">${motif()}<p>You have no linked mailboxes.</p><a class="btn secondary" href="/accounts/link">Link your first mailbox</a></div>`
     }</div>
 </section>
 
-<section class="sect" id="connect">
-<div class="rule"><span class="n">03</span><span>Connect Claude</span><span class="end">Custom connector</span></div>
-<div class="panel connect">
-<ol class="steps">
-<li><div>In Claude, open <b>Customize → Connectors</b>.</div></li>
-<li><div>Click <b>+ Add</b>, then click <b>Add custom connector</b>.</div></li>
-<li><div>Enter <code>${a}</code> as the name and this URL as the URL:${copyBox(mcpUrl)}</div></li>
-<li><div>Click <b>Continue</b> until Claude shows the <b>Authentication</b> settings.</div></li>
-<li><div>Under <b>Authentication</b>, choose <b>Sign in now</b>. Then click <b>Add</b>.</div></li>
-<li><div>Click <b>Connect</b>.</div></li>
-<li><div>If the ${a} sign-in page opens, sign in with <b>${esc(who)}</b>.</div></li>
-<li><div>Click <b>Allow</b> on the ${a} consent page.</div></li>
-</ol>
-<div class="side pad">
-<div class="label">Team and Enterprise plans</div>
-<p>On a Team or Enterprise plan, an Owner adds the connector once in <b>Organization settings → Connectors</b>, with <b>Add → Custom → Web</b>. Then each person opens <b>Customize → Connectors</b> and clicks <b>Connect</b> next to ${a}.</p>
-<div class="label">Tools</div>
-<p>Claude then has tools for every mailbox above. With these tools, Claude can list your mailboxes, search, read threads, apply labels, create drafts and forwards, and trash threads. Claude can also read calendars, find free time, and create, change and delete events. Claude can propose changes to the global context and to the context of each mailbox, and you accept or reject each proposal. Claude can send drafts, send invitations and reply to invitations only where you allow it.</p>
-</div></div>
+<section class="sect" id="global">
+<div class="rule"><span class="n">02</span><span>Global context</span><span class="end">Every mailbox</span></div>
+<div class="panel raised ticks register">${globalHtml}</div>
 </section>`,
-    {
-      app,
-      width: "wide",
-      nav: [
-        { href: "/", text: "Mailboxes", current: true },
-        { href: "#connect", text: "Connect Claude" },
-      ],
-      aside: signedIn(who),
-    },
+    { app, width: "wide", nav: userNav("mailboxes"), aside: signedIn(who) },
+  );
+}
+
+export function connectPage(app: string, origin: string, who: string) {
+  const a = esc(app);
+  const url = `${origin}/mcp`;
+  // The name of the MCP server in the commands of the terminal apps.
+  const server = app.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "mailroom";
+  const steps = (items: string[]) => `<ol class="steps">${items.map((i) => `<li><div>${i}</div></li>`).join("")}</ol>`;
+  const signIn = `If the ${a} sign-in page opens, sign in with <b>${esc(who)}</b>. Then click <b>Allow</b> on the ${a} consent page.`;
+  const agent = (n: string, id: string, title: string, end: string, items: string[], side: string) =>
+    `<section class="sect" id="${id}"><div class="rule"><span class="n">${n}</span><span>${title}</span><span class="end">${end}</span></div>
+<div class="panel connect">${steps(items)}<div class="side pad">${side}</div></div></section>`;
+  return page(
+    "Connect an agent",
+    `<div class="rule"><span class="n">Connect</span><span>Agents</span><span class="end">MCP · OAuth</span></div>
+<div class="title"><div><h1>Connect an agent</h1>
+<p class="lede">Connect an AI agent to ${a}, so that it can use your mailboxes and calendars. Each app connects to the URL below and signs in to ${a}. The agent then has tools for every mailbox that you link. It can search and read email, apply labels, save drafts and forwards, trash threads, and read and change calendars. It can send email, send invitations and reply to invitations only where you allow it.</p>
+${copyBox(url)}
+<p class="help">Steps for: <a href="#claude">Claude</a> · <a href="#claude-code">Claude Code</a> · <a href="#codex">Codex</a> · <a href="#chatgpt">ChatGPT</a> · <a href="#new-tools">New tools</a></p></div></div>
+${agent(
+  "01",
+  "claude",
+  "Claude",
+  "Web, desktop and mobile",
+  [
+    "In Claude, open <b>Customize → Connectors</b>.",
+    "Click <b>+ Add</b>, then click <b>Add custom connector</b>.",
+    `Enter <code>${a}</code> as the name and this URL as the URL:${copyBox(url)}`,
+    "Click <b>Continue</b> until Claude shows the <b>Authentication</b> settings.",
+    "Under <b>Authentication</b>, choose <b>Sign in now</b>. Then click <b>Add</b>.",
+    "Click <b>Connect</b>.",
+    signIn,
+  ],
+  `<div class="label">Team and Enterprise plans</div>
+<p>An Owner adds the connector once in <b>Organization settings → Connectors</b>, with <b>Add → Custom → Web</b>. Then each person opens <b>Customize → Connectors</b> and clicks <b>Connect</b> next to ${a}.</p>`,
+)}
+${agent(
+  "02",
+  "claude-code",
+  "Claude Code",
+  "Terminal",
+  [
+    `In a terminal, run this command:${copyBox(`claude mcp add --transport http --scope user ${server} ${url}`)}`,
+    "Start Claude Code, and run <code>/mcp</code>.",
+    `Select <b>${esc(server)}</b>, and then choose <b>Authenticate</b>.`,
+    signIn,
+  ],
+  `<div class="label">Projects</div>
+<p>The command adds ${a} to all your projects. To add it only to the project in the current folder, remove <code>--scope user</code>.</p>`,
+)}
+${agent(
+  "03",
+  "codex",
+  "Codex",
+  "CLI, IDE extension and ChatGPT desktop app",
+  [
+    `In a terminal, run this command:${copyBox(`codex mcp add ${server} --url ${url}`)}`,
+    `Run this command. Codex opens the ${a} sign-in page in your browser.${copyBox(`codex mcp login ${server}`)}`,
+    signIn,
+    "If you use Codex in the ChatGPT desktop app, restart the app.",
+  ],
+  `<div class="label">One setting for each computer</div>
+<p>The Codex CLI, the Codex IDE extension and the ChatGPT desktop app use the same settings file, <code>~/.codex/config.toml</code>. Add ${a} once on each computer.</p>`,
+)}
+${agent(
+  "04",
+  "chatgpt",
+  "ChatGPT",
+  "Developer mode",
+  [
+    "In ChatGPT, open <b>Settings → Apps &amp; Connectors → Advanced settings</b>, and turn on <b>Developer mode</b>.",
+    "In <b>Settings → Apps &amp; Connectors</b>, click <b>Create</b>.",
+    `Enter <code>${a}</code> as the name and this URL as the connector URL:${copyBox(url)}`,
+    "Choose <b>OAuth</b> as the authentication. Then click <b>Create</b>.",
+    signIn,
+    `In a chat, ask ChatGPT to use ${a}.`,
+  ],
+  `<div class="label">Plans</div>
+<p>Developer mode is available on the Plus, Pro, Business, Enterprise and Edu plans. On a Business, Enterprise or Edu plan, an admin can need to allow custom connectors first.</p>
+<p>OpenAI can change the names of these menus.</p>`,
+)}
+<section class="sect" id="new-tools"><div class="rule"><span class="n">05</span><span>New tools</span><span class="end">After an update</span></div>
+<div class="panel pad doc">
+<p>An app keeps the ${a} tools from the time that it connected. When ${a} adds or changes tools, the app gets them only after you reconnect ${a} in it. The Mailboxes page shows a warning for each connection that has the old tools, and the <a href="/release-notes">release notes</a> tell you what changed.</p>
+<ul>
+<li><b>Claude:</b> open <b>Customize → Connectors</b>, disconnect ${a}, and then connect it again.</li>
+<li><b>Claude Code:</b> start Claude Code again.</li>
+<li><b>Codex:</b> start Codex again. In the ChatGPT desktop app, restart the app.</li>
+<li><b>ChatGPT:</b> open a new chat. If the new tools do not show, delete the ${a} connector in <b>Settings → Apps &amp; Connectors</b>, and then create it again.</li>
+</ul></div></section>`,
+    { app, width: "wide", nav: userNav("connect"), aside: signedIn(who) },
   );
 }
 
@@ -1231,7 +1328,7 @@ ${d.redirectIsLoopback ? warning("That address is on your computer. Continue onl
 </div></div>
 <form method="post" action="/authorize" class="grp decide">
 <input type="hidden" name="handle" value="${esc(handle)}">
-<p class="muted">If you click <b>Allow</b>, ${a} sends the access to <b>${esc(d.redirectHost)}</b>. To revoke this access at any time, remove the connector in Claude.</p>
+<p class="muted">If you click <b>Allow</b>, ${a} sends the access to <b>${esc(d.redirectHost)}</b>. To revoke this access at any time, remove the connector in the app.</p>
 <div class="row"><button name="decision" value="approve">Allow</button><button class="secondary" name="decision" value="deny">Deny</button></div>
 </form></div>`,
     { app, width: "narrow", backdrop: "letter", aside: signedIn(who) },
@@ -1360,9 +1457,9 @@ ${
 <div class="title"><div><h1>${owner.kind === "global" ? "Global context history" : "Context history"}</h1>
 <p class="lede">${
       owner.kind === "global"
-        ? `${a} instructs Claude to follow the current global context in every mailbox. Where the context of a mailbox conflicts with it, Claude follows the context of the mailbox.`
-        : `${a} instructs Claude to read the current context of <b>${esc(owner.account.email)}</b> before it works in this mailbox.`
-    } An agent can only propose a change. The context changes only when you accept the proposal. The name of the app comes from the Claude connection that you approved. The agent gives its own name, in quotes, and its reason. ${a} cannot verify them.</p></div>
+        ? `${a} instructs agents to follow the current global context in every mailbox. Where the context of a mailbox conflicts with it, agents follow the context of the mailbox.`
+        : `${a} instructs agents to read the current context of <b>${esc(owner.account.email)}</b> before they work in this mailbox.`
+    } An agent can only propose a change. The context changes only when you accept the proposal. The name of the app comes from the agent connection that you approved. The agent gives its own name, in quotes, and its reason. ${a} cannot verify them.</p></div>
 <a class="btn secondary" href="/">Back to mailboxes</a></div>
 ${
   h.proposal
@@ -1374,6 +1471,6 @@ ${proposalHtml(h.proposal)}</section>`
 ${versionsHtml}
 </section>
 ${h.proposal ? `<script>${PROPOSAL_JS}</script>` : ""}`,
-    { app, width: "wide", nav: [{ href: "/", text: "Mailboxes" }], aside: signedIn(who) },
+    { app, width: "wide", nav: userNav(), aside: signedIn(who) },
   );
 }
