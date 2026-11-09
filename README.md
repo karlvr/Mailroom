@@ -177,9 +177,15 @@ For a separate deployment, a person can click **Deploy to Cloudflare** with thei
 
 An update keeps your `ADMIN_PASSWORD`, your settings and your linked mailboxes. `npm run deploy` applies new database migrations before it deploys the new code.
 
+An update can add a setup step or change one. Then the Mailboxes page shows a notice until the admin completes the new steps. To complete them:
+
+1. Open the setup page. Each page has an **Admin setup** link in the footer, or you can go to `/setup`.
+2. Do the steps marked **New**.
+3. Click **I did these steps**.
+
 **Calendar:** if you update from a version without the calendar tools, do these steps after the deploy:
 
-1. The admin enables the [Google Calendar API](https://console.cloud.google.com/apis/library/calendar-json.googleapis.com) in the Google Cloud project of Mailroom.
+1. The admin enables the [Google Calendar API](https://console.cloud.google.com/apis/library/calendar-json.googleapis.com) in the Google Cloud project of Mailroom. The setup page marks this step **New**.
 2. Each person clicks **Re-link** for each mailbox, and keeps the Calendar check boxes selected on the Google consent screen.
 
 Until a mailbox is re-linked, the email tools continue to work, and the calendar tools tell Claude that the calendar is not linked.

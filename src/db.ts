@@ -51,6 +51,22 @@ export async function saveGoogleConfig(env: Env, cfg: GoogleConfig): Promise<voi
   await setConfig(env, "google_client_secret", await encrypt(await dataKey(env), cfg.clientSecret, "google_client_secret"));
 }
 
+/**
+ * Returns the version of the setup steps that the admin last completed. A deployment that the admin
+ * configured before Mailroom recorded the version has version 1. A deployment that the admin did not
+ * configure yet has version 0.
+ */
+export async function getSetupVersion(env: Env): Promise<number> {
+  const version = await getConfig(env, "setup_version");
+  if (version) return Number(version);
+  return (await getConfig(env, "google_client_id")) ? 1 : 0;
+}
+
+/** Records that the admin completed the setup steps of `version`. */
+export async function setSetupVersion(env: Env, version: number): Promise<void> {
+  await setConfig(env, "setup_version", String(version));
+}
+
 /** Who may sign in: exact addresses or "@domain.com" entries, one per line. */
 export async function getAllowlist(env: Env): Promise<string[]> {
   const raw = (await getConfig(env, "allowed_emails")) ?? "";

@@ -11,11 +11,13 @@ import {
   getConfig,
   getGoogleConfig,
   getRefreshToken,
+  getSetupVersion,
   isAllowed,
   listAccounts,
   saveGoogleConfig,
   saveLinkedAccount,
   setConfig,
+  setSetupVersion,
   restoreContextVersion,
   updateAccountDetails,
   upsertUser,
@@ -23,6 +25,7 @@ import {
 import { GMAIL_SCOPE, authorizeUrl, exchangeCode, hasCalendar, pkcePair, revokeToken } from "./google";
 import {
   PERMISSION_FIELDS,
+  SETUP_VERSION,
   adminLoginPage,
   consentPage,
   contextPage,
@@ -129,6 +132,7 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
     if (path === "/setup" && method === "GET") return setupGet(req, env, origin, app);
     if (path === "/setup/login" && method === "POST") return setupLogin(req, env, origin, app);
     if (path === "/setup" && method === "POST") return setupSave(req, env, origin, app);
+    if (path === "/setup/confirm" && method === "POST") return setupConfirm(req, env, origin, app);
     if (path === "/login" && method === "GET") return startGoogle(req, env, origin, app, "login");
     if (path === "/logout") return logout(req, env);
     if (path === "/accounts/link" && method === "GET") return startGoogle(req, env, origin, app, "link");
@@ -162,15 +166,23 @@ async function home(req: Request, env: Env, origin: string, app: string) {
   const flash = new URL(req.url).searchParams.get("msg") ?? undefined;
   const accounts = await listAccounts(env, session.userId);
   const history = await contextSummaries(env, session.userId);
-  return dashboardPage(app, origin, session.email, accounts, history, session.csrf, flash);
+  const setupOutdated = (await getSetupVersion(env)) < SETUP_VERSION;
+  return dashboardPage(app, origin, session.email, accounts, history, session.csrf, { flash, setupOutdated });
 }
 
-async function setupGet(req: Request, env: Env, origin: string, app: string, extra: { saved?: boolean; error?: string } = {}) {
+async function setupGet(
+  req: Request,
+  env: Env,
+  origin: string,
+  app: string,
+  extra: { saved?: boolean; confirmed?: boolean; error?: string } = {},
+) {
   const admin = await getAdminSession(env, req);
   if (!admin) return adminLoginPage(app);
   const cfg = await getGoogleConfig(env);
   return setupPage(app, origin, {
     configured: !!cfg,
+    completedVersion: await getSetupVersion(env),
     clientId: (await getConfig(env, "google_client_id")) ?? "",
     allowlist: (await getAllowlist(env)).join("\n"),
     csrf: admin.csrf,
@@ -217,9 +229,20 @@ async function setupSave(req: Request, env: Env, origin: string, app: string) {
   const existing = await getGoogleConfig(env);
   const clientSecret = secret || existing?.clientSecret;
   if (!clientSecret) return setupGet(req, env, origin, app, { error: "Paste the Client secret." });
+  // An admin who saves the credentials for the first time followed the current steps.
+  if ((await getSetupVersion(env)) === 0) await setSetupVersion(env, SETUP_VERSION);
   await saveGoogleConfig(env, { clientId, clientSecret });
   await setConfig(env, "allowed_emails", allowlist.join("\n"));
   return setupGet(req, env, origin, app, { saved: true });
+}
+
+async function setupConfirm(req: Request, env: Env, origin: string, app: string) {
+  const admin = await getAdminSession(env, req);
+  if (!admin) return adminLoginPage(app);
+  const f = await form(req);
+  if (!checkCsrf(f, admin.csrf)) return setupGet(req, env, origin, app, { error: "That form expired. Try again." });
+  await setSetupVersion(env, SETUP_VERSION);
+  return setupGet(req, env, origin, app, { confirmed: true });
 }
 
 async function logout(req: Request, env: Env) {

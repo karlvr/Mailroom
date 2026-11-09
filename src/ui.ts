@@ -187,6 +187,9 @@ input[type=checkbox]{flex:none;width:18px;height:18px;margin:0;accent-color:var(
 .step .sb>*+*{margin-top:12px}
 .step.done .num{border-color:transparent;background:var(--accent-soft);color:var(--accent)}
 .step.focus{border-color:var(--accent)}
+.step.new{border-color:var(--warn-line)}
+.step.new .num{border-color:var(--warn-line);background:var(--warn-bg);color:var(--warn)}
+.rail a span.new{margin-left:auto;color:var(--warn)}
 .step.focus .num{border-color:var(--accent);background:var(--accent);color:var(--accent-ink)}
 .sub{margin:0;padding:0;list-style:none;counter-reset:sub}
 .sub>li{counter-increment:sub;display:grid;grid-template-columns:28px minmax(0,1fr);gap:14px;margin:0 0 12px}
@@ -401,7 +404,7 @@ export function page(title: string, body: string, opts: PageOptions): Response {
 <main class="${opts.width ?? "text"}">
 ${body}
 </main>
-<footer class="foot"><div><span>${app} is a self-hosted mailbox and calendar connector for Claude. Claude can send email and calendar invitations only from an account where you allow it.</span><span><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/costs">Costs</a></span></div></footer>
+<footer class="foot"><div><span>${app} is a self-hosted mailbox and calendar connector for Claude. Claude can send email and calendar invitations only from an account where you allow it.</span><span><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/costs">Costs</a> · <a href="/setup">Admin setup</a></span></div></footer>
 </div><script>${COPY_JS};${TIME_JS}</script></body></html>`;
   return new Response(html, {
     headers: {
@@ -466,6 +469,12 @@ ${error ? warning(esc(error)) : ""}
   );
 }
 
+/**
+ * The version of the setup steps. Increase it when a release adds a setup step or changes what the
+ * admin must do in a step, and set `changedIn` of that step to the new value.
+ */
+export const SETUP_VERSION = 2;
+
 /** One step of the setup page. */
 interface SetupStep {
   /** The name of the step in the list of steps. */
@@ -479,6 +488,8 @@ interface SetupStep {
   done?: boolean;
   /** True when the person does the step on the setup page itself. */
   focus?: boolean;
+  /** The setup version that added the step or last changed it. The default is 1. */
+  changedIn?: number;
 }
 
 /** Returns a list of sub-steps. The step that contains the list supplies the number before each sub-step number. */
@@ -487,7 +498,18 @@ const subSteps = (items: string[]) => `<ol class="sub">${items.map((i) => `<li><
 export function setupPage(
   app: string,
   origin: string,
-  s: { configured: boolean; clientId: string; allowlist: string; csrf: string; saved?: boolean; error?: string },
+  s: {
+    configured: boolean;
+    /** The setup version that the admin last completed. */
+    completedVersion: number;
+    clientId: string;
+    allowlist: string;
+    csrf: string;
+    saved?: boolean;
+    /** True when the admin confirmed the new steps a moment ago. */
+    confirmed?: boolean;
+    error?: string;
+  },
 ) {
   const a = esc(app);
   const ext = (href: string, text: string) => `<a href="${href}" target="_blank" rel="noopener">${text}</a>`;
@@ -505,6 +527,7 @@ export function setupPage(
       title: "Enable the Gmail API and the Google Calendar API",
       where: "console.cloud.google.com",
       done: s.configured,
+      changedIn: 2,
       body: subSteps([
         `${ext("https://console.cloud.google.com/apis/library/gmail.googleapis.com", "Open the Gmail API")} and click <b>Enable</b>.`,
         `${ext("https://console.cloud.google.com/apis/library/calendar-json.googleapis.com", "Open the Google Calendar API")} and click <b>Enable</b>.`,
@@ -567,26 +590,43 @@ ${subSteps([
     },
   ];
   const number = (i: number) => String(i + 1).padStart(2, "0");
+  // On a configured deployment, a step that changed after the version that the admin completed is new.
+  const isNew = (st: SetupStep) => s.configured && (st.changedIn ?? 1) > s.completedVersion;
+  const newSteps = steps.map((st, i) => ({ st, i })).filter(({ st }) => isNew(st));
   const rail = steps
-    .map((st, i) => `<a href="#step-${i + 1}"><span>${number(i)}</span>${esc(st.short)}${st.done ? ICON.check : ""}</a>`)
+    .map(
+      (st, i) =>
+        `<a href="#step-${i + 1}"><span>${number(i)}</span>${esc(st.short)}${
+          isNew(st) ? `<span class="new">New</span>` : st.done ? ICON.check : ""
+        }</a>`,
+    )
     .join("");
   const cards = steps
-    .map(
-      (st, i) => `<section id="step-${i + 1}" class="panel step${st.done ? " done" : ""}${st.focus ? " focus raised ticks accent" : ""}" style="--n:'${i + 1}'">
-<div class="sh"><span class="num">${number(i)}</span><h2>${esc(st.title)}</h2><span class="where">${esc(st.where)}</span></div>
-<div class="sb">${st.body}</div></section>`,
-    )
+    .map((st, i) => {
+      const done = st.done && !isNew(st);
+      return `<section id="step-${i + 1}" class="panel step${done ? " done" : ""}${isNew(st) ? " new" : ""}${st.focus ? " focus raised ticks accent" : ""}" style="--n:'${i + 1}'">
+<div class="sh"><span class="num">${number(i)}</span><h2>${esc(st.title)}</h2>${isNew(st) ? `<span class="pill warn">New</span>` : ""}<span class="where">${esc(st.where)}</span></div>
+<div class="sb">${st.body}</div></section>`;
+    })
     .join("\n");
+  const update = newSteps.length
+    ? `<div class="notice">${ICON.warn}<div>This version of ${a} added or changed ${newSteps.length === 1 ? "a setup step" : `${newSteps.length} setup steps`}: ${newSteps
+        .map(({ st, i }) => `<a href="#step-${i + 1}">${number(i)} ${esc(st.short)}</a>`)
+        .join(", ")}. Do the ${newSteps.length === 1 ? "step" : "steps"} marked New, then click <b>I did these steps</b>. Until then, the Mailboxes page asks the admin to open this page.
+<form method="post" action="/setup/confirm" class="row"><input type="hidden" name="csrf" value="${esc(s.csrf)}"><button>I did these steps</button></form></div></div>`
+    : "";
   return page(
     "Setup",
     `<div class="rule"><span class="n">Setup</span><span>Google OAuth</span><span class="end">${steps.length} steps</span></div>
 <h1>Connect to Google</h1>
-<p class="lede">You do this setup only once. It takes about 10 minutes. Each link opens the Google Cloud screen for that step in a new tab. Keep this page open.</p>
+<p class="lede">You do this setup only once. It takes about 10 minutes. Each link opens the Google Cloud screen for that step in a new tab. Keep this page open. When a new version of ${a} adds or changes a step, this page marks the step New.</p>
 <div class="split">
 <nav class="rail" aria-label="Setup steps"><div class="panel"><div class="label">Steps</div>${rail}</div>
 <div class="panel worker"><div class="label">This Worker</div><div class="mono">${esc(new URL(origin).host)}</div></div></nav>
 <div class="stack">
 ${s.saved ? `<div class="notice ok">${a} saved the settings. <a href="/">Sign in and link your mailboxes →</a></div>` : ""}
+${s.confirmed ? `<div class="notice ok">${a} recorded that the setup is up to date.</div>` : ""}
+${update}
 ${s.error ? warning(esc(s.error)) : ""}
 <div class="notice info"><span>The Mailroom software is free of charge. You pay the costs of your Cloudflare account and your Google Cloud project. To decide which plans you need, read <a href="/costs">Costs</a>.</span></div>
 ${cards}
@@ -805,7 +845,11 @@ export function dashboardPage(
   accounts: Account[],
   history: Map<string, ContextSummary>,
   csrf: string,
-  flash?: string,
+  notices: {
+    flash?: string;
+    /** True when this version has setup steps that the admin did not complete. */
+    setupOutdated?: boolean;
+  } = {},
 ) {
   const a = esc(app);
   const mcpUrl = `${origin}/mcp`;
@@ -882,7 +926,12 @@ ${
   };
   return page(
     "Mailboxes",
-    `${flash ? `<div class="notice info">${esc(flash)}</div>` : ""}
+    `${notices.flash ? `<div class="notice info">${esc(notices.flash)}</div>` : ""}
+${
+  notices.setupOutdated
+    ? warning(`This version of ${a} needs a new setup step. The admin must open the <a href="/setup">setup page</a> and do the steps marked New. Until then, some tools can fail.`)
+    : ""
+}
 <section class="sect" id="mailboxes">
 <div class="rule"><span class="n">01</span><span>Mailboxes</span><span class="end">${accounts.length} linked</span></div>
 <div class="title"><div><h1>Your mailboxes</h1>
