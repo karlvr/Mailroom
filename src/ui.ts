@@ -1137,6 +1137,22 @@ ${
     : "";
 
   const global = contexts.global;
+
+  // Each context with a proposal that waits for the user, the global context first.
+  const waiting = [
+    ...(global.summary?.hasProposal ? [{ name: "Global context", subject: GLOBAL_CONTEXT as ContextSubject }] : []),
+    ...accounts.filter(hasProposal).map((m) => ({ name: m.name || m.email, subject: subject(m) })),
+  ];
+  const proposalBanner = waiting.length
+    ? warning(
+        `${waiting.length === 1 ? "A context proposal waits" : "Context proposals wait"} for your review: ${waiting
+          .map((w) => `<a href="${contextHref(w.subject)}#proposal">${esc(w.name)}</a>`)
+          .join(", ")}. ${waiting.length === 1 ? "The context changes" : "A context changes"} only when you accept ${
+          waiting.length === 1 ? "the" : "its"
+        } proposal.`,
+      )
+    : "";
+
   const globalPreview = contextPreviewLine(global.context);
   const globalHtml = `<details class="mbx" id="global-context">
 <summary><span class="id">ALL</span>
@@ -1169,6 +1185,7 @@ ${
     ? warning(`This version of ${a} needs a new setup step. The admin must open the <a href="/setup">setup page</a> and do the steps marked New. Until then, some tools can fail.`)
     : ""
 }
+${proposalBanner}
 ${outdatedHtml(app, notices.outdatedConnections ?? [])}
 ${setupBanner}
 <section class="sect" id="mailboxes">
