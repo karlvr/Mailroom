@@ -145,19 +145,19 @@ export interface AccountPermissions {
   /** True when agents may invite guests to events, and change or delete events that have other guests. */
   sendInvitations: boolean;
   /** True when agents may accept, decline or tentatively accept invitations. */
-  replyToInvitations: boolean;
+  rsvp: boolean;
 }
 
 /** The label of the setting that controls each permission, as the owner sees it on the web page. */
 export const PERMISSION_LABELS: Record<keyof AccountPermissions, string> = {
   sendEmail: "Allow sending email",
   sendInvitations: "Allow sending calendar invitations",
-  replyToInvitations: "Allow replies to invitations",
+  rsvp: "Allow RSVPs",
 };
 
 /** Returns the permissions that the owner gave to an account. */
 export function accountPermissions(a: Account): AccountPermissions {
-  return { sendEmail: a.allow_send === 1, sendInvitations: a.allow_invite === 1, replyToInvitations: a.allow_reply === 1 };
+  return { sendEmail: a.allow_send === 1, sendInvitations: a.allow_invite === 1, rsvp: a.allow_reply === 1 };
 }
 
 /** Returns the Google permissions that the stored refresh token of the account grants. */
@@ -246,7 +246,7 @@ export async function updateAccountDetails(
   const update = env.DB.prepare(
     `UPDATE accounts SET name = ?, allow_send = ?, allow_invite = ?, allow_reply = ?, updated_at = ?
      WHERE id = ? AND user_id = ?`,
-  ).bind(details.name.slice(0, 100), p.sendEmail ? 1 : 0, p.sendInvitations ? 1 : 0, p.replyToInvitations ? 1 : 0, now, id, userId);
+  ).bind(details.name.slice(0, 100), p.sendEmail ? 1 : 0, p.sendInvitations ? 1 : 0, p.rsvp ? 1 : 0, now, id, userId);
   const change = await userChange(env, userId, { kind: "account", accountId: id }, details.context, editor, now);
   await env.DB.batch([update, ...change]);
 }

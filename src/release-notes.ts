@@ -25,7 +25,7 @@ export const RELEASE_NOTES: ReleaseDay[] = [
       "An agent can propose changes to a context. You accept, edit or reject each proposal.",
       "Each context keeps a history, so you can compare and restore earlier versions.",
       "An agent can forward an email, with its attachments, as a draft.",
-      "Two new settings for each mailbox let agents send calendar invitations and reply to invitations.",
+      "Two new settings for each mailbox let agents send calendar invitations and RSVP to invitations.",
       "An agent can read your Google Calendar, find free time, and create and change events. To add the calendar to a mailbox, click Re-link.",
     ],
   },

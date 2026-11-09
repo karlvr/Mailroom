@@ -418,7 +418,7 @@ async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: st
     permissions: {
       sendEmail: selected("sendEmail"),
       sendInvitations: selected("sendInvitations"),
-      replyToInvitations: selected("replyToInvitations"),
+      rsvp: selected("rsvp"),
     },
   }, session.email);
   return redirect(withMessages("/", "saved"));

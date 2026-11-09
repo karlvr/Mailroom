@@ -6,7 +6,7 @@ Mailroom is a self-hosted Cloudflare Worker. It lets AI agents, such as Claude, 
 - Give each mailbox a name and context notes. Mailroom instructs agents to read these notes before they work in that mailbox.
 - Write a global context for the notes that apply to every mailbox, for example who you are, your priorities and how you write. Where the context of a mailbox conflicts with the global context, Mailroom instructs agents to follow the context of the mailbox.
 - An agent can **search, read, label, draft and trash** email. An agent can **send** email only from a mailbox where you select **Allow sending email**. An agent **cannot delete** email permanently.
-- An agent can **read calendars, find free time, and create, change and delete events**. An agent can send calendar invitations only from a mailbox where you select **Allow sending calendar invitations**. An agent can reply to invitations only for a mailbox where you select **Allow replies to invitations**.
+- An agent can **read calendars, find free time, and create, change and delete events**. An agent can send calendar invitations only from a mailbox where you select **Allow sending calendar invitations**. An agent can RSVP to invitations only for a mailbox where you select **Allow RSVPs**.
 - Mailroom instructs agents to treat email and calendar content as data, never as instructions.
 - Mailroom runs only on your own Cloudflare account, and no third party operates it. Mailroom encrypts the Google tokens that it stores.
 
@@ -63,7 +63,7 @@ You do not need app verification from Google. When you link a mailbox, Google sh
 6. Each mailbox has three settings for actions that notify other people. Each setting is off until you select it. Read [Write actions and untrusted content](#write-actions-and-untrusted-content) first.
    - **Allow sending email:** agents can send email from the mailbox.
    - **Allow sending calendar invitations:** agents can invite guests to events, and change or delete events that have other guests. Google emails each guest.
-   - **Allow replies to invitations:** agents can accept, decline or tentatively accept invitations. Google tells the organizer.
+   - **Allow RSVPs:** agents can accept, decline or tentatively accept invitations. Google tells the organizer.
 
 ### 4. Connect an agent
 
@@ -129,7 +129,7 @@ The agent then has these tools:
 | `create_event` | Creates an event, with an optional Google Meet link. To invite guests, it needs **Allow sending calendar invitations**. |
 | `update_event` | Changes an event, and adds or removes guests. For an event with other guests, it needs **Allow sending calendar invitations**. |
 | `delete_event` | Deletes an event that the mailbox organizes. For an event with other guests, it needs **Allow sending calendar invitations**. It refuses an invitation from another person. |
-| `respond_to_event` | Accepts, declines or tentatively accepts an invitation. It needs **Allow replies to invitations**. |
+| `respond_to_event` | Accepts, declines or tentatively accepts an invitation. It needs **Allow RSVPs**. |
 
 ### 5. Run one agent for each mailbox
 
@@ -139,7 +139,7 @@ Create a scheduled task for each mailbox, for example in Claude:
 
 ## Write actions and untrusted content
 
-Labelling, archiving, drafting, sending and trashing email are write actions. Creating, changing, deleting and replying to calendar events are also write actions. Mailroom instructs agents to do a write action only when you explicitly instruct them. These are your instructions:
+Labelling, archiving, drafting, sending and trashing email are write actions. Creating, changing and deleting calendar events, and RSVPs to invitations, are also write actions. Mailroom instructs agents to do a write action only when you explicitly instruct them. These are your instructions:
 
 - your messages to the agent
 - the prompt of a scheduled task
@@ -152,7 +152,7 @@ These instructions reduce the risk of prompt injection, but they cannot remove i
 
 - **Allow sending email** for `send_draft`. A forward is a draft, so an agent needs this setting to send a forward. Forwarding is the easiest way for a malicious email to get copies of your email.
 - **Allow sending calendar invitations** for invitations, and for changes and cancellations of events with other guests. An invitation copies the title, description and Meet link of the event to each guest.
-- **Allow replies to invitations** for `respond_to_event`
+- **Allow RSVPs** for `respond_to_event`
 
 Select a setting only for a mailbox where you accept this risk. An agent can always change or delete an event that has no other guests. If an agent trashes a thread by mistake, you can restore it from the Gmail trash for 30 days.
 
@@ -247,7 +247,7 @@ npm run deploy
 - **Stored secrets:** Mailroom encrypts the Google refresh tokens and the OAuth client secret with AES-GCM, and stores them in D1. Mailroom derives the key from `ADMIN_PASSWORD` with PBKDF2 and a random salt for each deployment. A copy of the database alone is not sufficient to decrypt the secrets. The encryption protects the secrets if a copy of the database leaks, but it does not protect them from the operator.
 - **Google access tokens:** Mailroom keeps these tokens only in Worker memory.
 - **Gmail permission:** Mailroom uses Google's `gmail.modify` permission. This permission allows Mailroom to read, label, draft, send and trash email, but not to delete email permanently. `send_draft` works only for a mailbox where the owner selected **Allow sending email**.
-- **Calendar permissions:** Mailroom uses Google's `calendar.events`, `calendar.calendarlist.readonly` and `calendar.events.freebusy` permissions. These permissions allow Mailroom to read and change events, list calendars and find busy times. They do not allow Mailroom to change the sharing of a calendar or to delete a calendar. Mailroom sends invitations and replies only for a mailbox where the owner selected the setting for that action.
+- **Calendar permissions:** Mailroom uses Google's `calendar.events`, `calendar.calendarlist.readonly` and `calendar.events.freebusy` permissions. These permissions allow Mailroom to read and change events, list calendars and find busy times. They do not allow Mailroom to change the sharing of a calendar or to delete a calendar. Mailroom sends invitations and RSVPs only for a mailbox where the owner selected the setting for that action.
 - **Mailbox removal:** When you remove a mailbox, Mailroom also revokes its Google access.
 - **Agent access:** each agent connects with OAuth 2.1 through Cloudflare's `workers-oauth-provider`. This gives PKCE, a consent page that other sites cannot frame or forge, and a separate approval for each client.
 - **Browser protections:** Web sessions use `__Host-` cookies. All forms have CSRF protection. Mailroom limits the number of admin password attempts from each IP address.

@@ -762,7 +762,7 @@ ${
 <div class="facts">
 ${fact(1, "Hosting", `${a} runs on the Cloudflare account of the person or organisation that deployed it.`)}
 ${fact(2, "Credentials", `${a} encrypts the Google tokens that it stores. The operator of this ${a} can decrypt the tokens, so you must trust the operator. Read the <a href="/privacy">privacy policy</a>.`)}
-${fact(3, "Sending", `An agent can send email, send calendar invitations and reply to invitations only from an account where you allow it. An agent cannot delete email permanently.`)}
+${fact(3, "Sending", `An agent can send email, send calendar invitations and RSVP to invitations only from an account where you allow it. An agent cannot delete email permanently.`)}
 ${fact(4, "Content", `${a} instructs agents to treat email and calendar content as data, never as instructions.`)}
 </div>`,
     { app, width: "wide", backdrop: "envelope", aside: `<span class="live">${esc(new URL(origin).host)}</span>` },
@@ -778,7 +778,7 @@ export function privacyPage(app: string, origin: string) {
 ${section(
   `Data that ${a} stores`,
   `<ul><li>Your Google account ID, your email address, your global context, and the times of your first and last sign-in.</li>
-<li>For each mailbox that you link: its address, its short name, its context notes, the settings <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.replyToInvitations)}</b>, the Google permissions that you granted, and a Google refresh token. ${a} encrypts the token before it stores it.</li>
+<li>For each mailbox that you link: its address, its short name, its context notes, the settings <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.rsvp)}</b>, the Google permissions that you granted, and a Google refresh token. ${a} encrypts the token before it stores it.</li>
 <li>For your global context and for each mailbox: each version of the context notes that you saved or accepted, when the version became current, and who made it. For a change that an agent proposed, ${a} also stores the name of the app, and the name and the reason that the agent gave. ${a} deletes a proposal when you reject it.</li>
 <li>Your web session, a record of each agent connection that you approve, and the version of the tool list that each connection loaded last.</li></ul>
 <p>${a} does not store the content of your email or your calendar events.</p>`,
@@ -787,7 +787,7 @@ ${section(
   `How ${a} uses your Google data`,
   `<p>${a} uses Google sign-in to get your verified email address. ${a} uses the Gmail API and the Google Calendar API only when an agent calls one of the ${a} tools. ${a} then sends the result to that agent through the connection that you approved.</p>
 <p>The tools can search, read, label and trash email, and save drafts of new messages, replies and forwards. ${a} sends email only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendEmail)}</b>.</p>
-<p>The tools can read calendars, find free time, and create, change and delete events. ${a} sends calendar invitations only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b>. ${a} replies to invitations only for a mailbox where you select <b>${esc(PERMISSION_LABELS.replyToInvitations)}</b>.</p>
+<p>The tools can read calendars, find free time, and create, change and delete events. ${a} sends calendar invitations only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b>. ${a} RSVPs to invitations only for a mailbox where you select <b>${esc(PERMISSION_LABELS.rsvp)}</b>.</p>
 <p>${a} does not sell your data. ${a} does not use your data for advertising or to train AI models.</p>
 <p>The use and transfer of information that ${a} receives from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>`,
 )}
@@ -830,7 +830,7 @@ ${section(
 )}
 ${section(
   "Your instructions",
-  `<p>An agent uses ${a} when you instruct it. You are responsible for your instructions and for the actions that an agent does because of them. Select <b>${esc(PERMISSION_LABELS.sendEmail)}</b> only for a mailbox where you accept that an agent can send email. Select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.replyToInvitations)}</b> only for a mailbox where you accept that an agent can send calendar invitations and replies.</p>
+  `<p>An agent uses ${a} when you instruct it. You are responsible for your instructions and for the actions that an agent does because of them. Select <b>${esc(PERMISSION_LABELS.sendEmail)}</b> only for a mailbox where you accept that an agent can send email. Select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.rsvp)}</b> only for a mailbox where you accept that an agent can send calendar invitations and RSVPs.</p>
 <p>${a} instructs agents to treat email and calendar content as data, never as instructions. This instruction reduces the risk that an email or an event tricks an agent, but it cannot remove the risk.</p>`,
 )}
 ${section(
@@ -905,7 +905,7 @@ ${RELEASE_NOTES.map((d) =>
 export const PERMISSION_FIELDS: Record<keyof AccountPermissions, string> = {
   sendEmail: "allow_send",
   sendInvitations: "allow_invite",
-  replyToInvitations: "allow_reply",
+  rsvp: "allow_reply",
 };
 
 /** Returns the path of the history page of a context. The paths of the actions on that context start with it. */
@@ -1068,12 +1068,12 @@ export function dashboardPage(
   const permissionPills: Record<keyof AccountPermissions, string> = {
     sendEmail: "Sending on",
     sendInvitations: "Invitations on",
-    replyToInvitations: "Replies on",
+    rsvp: "RSVP on",
   };
   const permissionHelp: Record<keyof AccountPermissions, string> = {
     sendEmail: "Agents can send email from this mailbox.",
     sendInvitations: "Agents can invite guests to events, and change or delete events that have other guests. Google emails each guest.",
-    replyToInvitations: "Agents can accept, decline or tentatively accept invitations. Google tells the organizer.",
+    rsvp: "Agents can accept, decline or tentatively accept invitations. Google tells the organizer.",
   };
   const permissionKeys = Object.keys(PERMISSION_FIELDS) as (keyof AccountPermissions)[];
   const acct = (m: Account, i: number) => {
@@ -1191,7 +1191,7 @@ ${setupBanner}
 <section class="sect" id="mailboxes">
 <div class="rule"><span class="n">01</span><span>Mailboxes</span><span class="end">${accounts.length} linked</span></div>
 <div class="title"><div><h1>Your mailboxes</h1>
-<p class="lede">Link each Gmail or Workspace mailbox. Agents can use these mailboxes and their calendars only through ${a}. Agents can label, draft and trash email, and create and change events. Agents can send email, send calendar invitations and reply to invitations only where you allow it.</p></div>
+<p class="lede">Link each Gmail or Workspace mailbox. Agents can use these mailboxes and their calendars only through ${a}. Agents can label, draft and trash email, and create and change events. Agents can send email, send calendar invitations and RSVP to invitations only where you allow it.</p></div>
 <div class="row"><a class="btn" href="/accounts/link">${ICON.plus}Link a mailbox</a><a class="btn secondary" href="/connect">Connect an agent</a></div></div>
 <div class="panel raised ticks register">${
       accounts.length
@@ -1222,7 +1222,7 @@ export function connectPage(app: string, origin: string, who: string) {
     "Connect an agent",
     `<div class="rule"><span class="n">Connect</span><span>Agents</span><span class="end">MCP · OAuth</span></div>
 <div class="title"><div><h1>Connect an agent</h1>
-<p class="lede">Connect an AI agent to ${a}, so that it can use your mailboxes and calendars. Each app connects to the URL below and signs in to ${a}. The agent then has tools for every mailbox that you link. It can search and read email, apply labels, save drafts and forwards, trash threads, and read and change calendars. It can send email, send invitations and reply to invitations only where you allow it.</p>
+<p class="lede">Connect an AI agent to ${a}, so that it can use your mailboxes and calendars. Each app connects to the URL below and signs in to ${a}. The agent then has tools for every mailbox that you link. It can search and read email, apply labels, save drafts and forwards, trash threads, and read and change calendars. It can send email, send invitations and RSVP to invitations only where you allow it.</p>
 ${copyBox(url)}
 <p class="help">Steps for: <a href="#claude">Claude</a> · <a href="#claude-code">Claude Code</a> · <a href="#codex">Codex</a> · <a href="#chatgpt">ChatGPT</a> · <a href="#new-tools">New tools</a></p></div></div>
 ${agent(
@@ -1313,7 +1313,7 @@ export function consentPage(
     return [
       p.sendEmail ? `<span class="pill ok">Can send</span>` : "",
       p.sendInvitations ? `<span class="pill ok">Can invite</span>` : "",
-      p.replyToInvitations ? `<span class="pill ok">Can reply</span>` : "",
+      p.rsvp ? `<span class="pill ok">Can RSVP</span>` : "",
     ].join("");
   };
   const mailboxes =
@@ -1341,7 +1341,7 @@ ${d.redirectIsLoopback ? warning("That address is on your computer. Continue onl
 <span>${ICON.check}Search and read email</span><span>${ICON.check}Label email</span><span>${ICON.check}Save drafts and forwards</span><span>${ICON.check}Move email to the trash</span>
 <span>${ICON.check}Read calendars and find free time</span><span>${ICON.check}Create, change and delete events without guests</span>
 <span>${ICON.send}Send email from a mailbox with the mark Can send</span><span>${ICON.send}Send calendar invitations from a mailbox with the mark Can invite</span>
-<span>${ICON.send}Reply to invitations for a mailbox with the mark Can reply</span><span>${ICON.check}Propose changes to the context, which you accept or reject</span><span class="no">${ICON.cross}Not delete email permanently</span>
+<span>${ICON.send}RSVP to invitations for a mailbox with the mark Can RSVP</span><span>${ICON.check}Propose changes to the context, which you accept or reject</span><span class="no">${ICON.cross}Not delete email permanently</span>
 </div></div>
 <form method="post" action="/authorize" class="grp decide">
 <input type="hidden" name="handle" value="${esc(handle)}">
