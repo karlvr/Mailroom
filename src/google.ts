@@ -6,7 +6,7 @@ import {
   getRefreshToken,
   setAccountStatus,
 } from "./db";
-import { b64url, fromB64url } from "./crypto";
+import { b64url, fromB64url, randomToken } from "./crypto";
 
 export const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
 
@@ -181,9 +181,13 @@ interface GoogleApi {
 }
 
 const GMAIL_API: GoogleApi = { name: "Gmail", base: "https://gmail.googleapis.com/gmail/v1/users/me" };
+const GMAIL_UPLOAD_API: GoogleApi = { name: "Gmail", base: "https://gmail.googleapis.com/upload/gmail/v1/users/me" };
 const CALENDAR_API: GoogleApi = { name: "Google Calendar", base: "https://www.googleapis.com/calendar/v3" };
 
 type ApiRequest = { method?: string; query?: Record<string, string | string[] | undefined>; body?: unknown };
+
+/** A request with a body that is not JSON. */
+type MediaRequest = Omit<ApiRequest, "body"> & { media: { contentType: string; data: string } };
 
 interface GoogleErrorBody {
   error?: { message?: string; errors?: { reason?: string }[]; details?: { reason?: string }[] };
@@ -194,21 +198,27 @@ const isApiDisabled = (body: GoogleErrorBody) =>
   !!body.error?.details?.some((d) => d.reason === "SERVICE_DISABLED") ||
   !!body.error?.errors?.some((e) => e.reason === "accessNotConfigured");
 
-async function googleApi<T>(env: Env, account: Account, api: GoogleApi, path: string, init: ApiRequest): Promise<T> {
+async function googleApi<T>(env: Env, account: Account, api: GoogleApi, path: string, init: ApiRequest | MediaRequest): Promise<T> {
   const url = new URL(`${api.base}${path}`);
   for (const [k, v] of Object.entries(init.query ?? {})) {
     if (v === undefined) continue;
     for (const item of Array.isArray(v) ? v : [v]) url.searchParams.append(k, item);
   }
+  const content =
+    "media" in init
+      ? { type: init.media.contentType, body: init.media.data }
+      : init.body !== undefined
+        ? { type: "application/json", body: JSON.stringify(init.body) }
+        : undefined;
   for (let attempt = 0; attempt < 2; attempt++) {
     const token = await accessToken(env, account);
     const res = await fetch(url, {
       method: init.method ?? "GET",
       headers: {
         Authorization: `Bearer ${token}`,
-        ...(init.body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...(content ? { "Content-Type": content.type } : {}),
       },
-      body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+      body: content?.body,
     });
     if (res.status === 401 && attempt === 0) {
       accessTokens.delete(account.id);
@@ -235,3 +245,28 @@ export const gmail = <T>(env: Env, account: Account, path: string, init: ApiRequ
 /** Call the Google Calendar API for one linked account. `path` is relative to /calendar/v3. */
 export const calendar = <T>(env: Env, account: Account, path: string, init: ApiRequest = {}) =>
   googleApi<T>(env, account, CALENDAR_API, path, init);
+
+/**
+ * Upload a whole RFC 822 message with its JSON metadata to the Gmail upload API, for one linked account.
+ * Use this for a message that can be too large for the `raw` field of a JSON request.
+ * `path` is relative to /upload/gmail/v1/users/me, for example `/drafts`.
+ */
+export function gmailUpload<T>(env: Env, account: Account, path: string, upload: { metadata: unknown; message: string }): Promise<T> {
+  const boundary = `mailroom-${randomToken(12)}`;
+  const data = [
+    `--${boundary}`,
+    "Content-Type: application/json; charset=UTF-8",
+    "",
+    JSON.stringify(upload.metadata),
+    `--${boundary}`,
+    "Content-Type: message/rfc822",
+    "",
+    upload.message,
+    `--${boundary}--`,
+  ].join("\r\n");
+  return googleApi<T>(env, account, GMAIL_UPLOAD_API, path, {
+    method: "POST",
+    query: { uploadType: "multipart" },
+    media: { contentType: `multipart/related; boundary=${boundary}`, data },
+  });
+}

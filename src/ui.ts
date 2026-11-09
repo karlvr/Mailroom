@@ -612,7 +612,7 @@ ${section(
 ${section(
   `How ${a} uses your Google data`,
   `<p>${a} uses Google sign-in to get your verified email address. ${a} uses the Gmail API and the Google Calendar API only when Claude calls one of the ${a} tools. ${a} then sends the result to Claude through the connection that you approved.</p>
-<p>The tools can search, read, label, draft and trash email. ${a} sends email only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendEmail)}</b>.</p>
+<p>The tools can search, read, label and trash email, and save drafts of new messages, replies and forwards. ${a} sends email only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendEmail)}</b>.</p>
 <p>The tools can read calendars, find free time, and create, change and delete events. ${a} sends calendar invitations only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b>. ${a} replies to invitations only for a mailbox where you select <b>${esc(PERMISSION_LABELS.replyToInvitations)}</b>.</p>
 <p>${a} does not sell your data. ${a} does not use your data for advertising or to train AI models.</p>
 <p>The use and transfer of information that ${a} receives from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>`,
@@ -730,7 +730,7 @@ ${m.status !== "ok" ? warning(`${esc(m.status_detail || "Google access stopped w
 <textarea id="context-${id}" name="context" placeholder="What this mailbox is for, who matters, what's urgent, what to ignore, how to sign replies…">${esc(m.context)}</textarea>
 </div>
 <div class="caps"><div class="label">What Claude can do here</div>
-${can("Search and read email")}${can("Add and remove labels")}${can("Save drafts")}${can("Move threads to the trash")}
+${can("Search and read email")}${can("Add and remove labels")}${can("Save drafts and forwards")}${can("Move threads to the trash")}
 ${
   calendar
     ? `${can("Read the calendar and find free time")}${can("Create, change and delete events without guests")}`
@@ -776,7 +776,7 @@ ${
 <div class="label">Team and Enterprise plans</div>
 <p>On a Team or Enterprise plan, an Owner adds the connector once in <b>Organization settings → Connectors</b>, with <b>Add → Custom → Web</b>. Then each person opens <b>Customize → Connectors</b> and clicks <b>Connect</b> next to ${a}.</p>
 <div class="label">Tools</div>
-<p>Claude then has tools for every mailbox above. With these tools, Claude can list your mailboxes, search, read threads, apply labels, create drafts and trash threads. Claude can also read calendars, find free time, and create, change and delete events. Claude can send drafts, send invitations and reply to invitations only where you allow it.</p>
+<p>Claude then has tools for every mailbox above. With these tools, Claude can list your mailboxes, search, read threads, apply labels, create drafts and forwards, and trash threads. Claude can also read calendars, find free time, and create, change and delete events. Claude can send drafts, send invitations and reply to invitations only where you allow it.</p>
 </div></div>
 </section>`,
     {
@@ -829,7 +829,7 @@ ${d.redirectIsLoopback ? warning("That address is on your computer. Continue onl
 </dl>
 <div class="grp"><div class="label">Mailboxes</div><ul class="mbl">${mailboxes}</ul></div>
 <div class="grp sunk"><div class="label">In these mailboxes, the app can</div><div class="can">
-<span>${ICON.check}Search and read email</span><span>${ICON.check}Label email</span><span>${ICON.check}Save drafts</span><span>${ICON.check}Move email to the trash</span>
+<span>${ICON.check}Search and read email</span><span>${ICON.check}Label email</span><span>${ICON.check}Save drafts and forwards</span><span>${ICON.check}Move email to the trash</span>
 <span>${ICON.check}Read calendars and find free time</span><span>${ICON.check}Create, change and delete events without guests</span>
 <span>${ICON.send}Send email from a mailbox with the mark Can send</span><span>${ICON.send}Send calendar invitations from a mailbox with the mark Can invite</span>
 <span>${ICON.send}Reply to invitations for a mailbox with the mark Can reply</span><span class="no">${ICON.cross}Not delete email permanently</span>

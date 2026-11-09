@@ -97,6 +97,7 @@ Claude then has these tools:
 | `list_labels` | Lists the labels of one mailbox |
 | `modify_thread_labels` | Adds labels to a thread or removes labels from it. When it adds a label that does not exist, it creates that label. Removing `INBOX` archives the thread. The tool rejects `TRASH` and `SPAM`. |
 | `create_draft` | Saves a new draft or a threaded reply. It does not send the draft. |
+| `create_forward_draft` | Saves a draft that forwards one message, with its attachments. It does not send the draft. |
 | `send_draft` | Sends a draft. It works only for a mailbox where you selected **Allow sending email**. |
 | `trash_thread` | Moves a thread to the trash. Gmail keeps trashed threads for 30 days. |
 | `list_calendars` | Lists the calendars of one mailbox |
@@ -126,7 +127,7 @@ Mailroom also instructs Claude to treat email and calendar content as data, neve
 
 These instructions reduce the risk of prompt injection, but they cannot remove it. A malicious email or invitation can still try to make Claude send email, invite a guest to a private meeting, or trash email. For this reason, each action that notifies other people is off for each mailbox until you select its setting:
 
-- **Allow sending email** for `send_draft`
+- **Allow sending email** for `send_draft`. A forward is a draft, so Claude needs this setting to send a forward. Forwarding is the easiest way for a malicious email to get copies of your email.
 - **Allow sending calendar invitations** for invitations, and for changes and cancellations of events with other guests. An invitation copies the title, description and Meet link of the event to each guest.
 - **Allow replies to invitations** for `respond_to_event`
 
@@ -228,4 +229,5 @@ Do not edit a migration after you push it, because deployments that already appl
 ## Limits
 
 - **Up to 100 Google users** while Google has not verified the app. Each person counts once, however many mailboxes they link. For more users, you need Google's verification and an annual security assessment (CASA).
-- **Plain-text drafts only.** `get_thread` lists the names of attachments, but no tool downloads attachments yet.
+- **Plain-text drafts only.** A forward has the plain text of the forwarded message, not its formatting.
+- **Attachments:** a forward copies the attachments of the message, up to 10 MB in total. `get_thread` lists the names of attachments, but no tool gives the content of an attachment to Claude.
