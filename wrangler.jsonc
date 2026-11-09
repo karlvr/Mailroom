@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mailroom",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+
+  // The Deploy button creates both resources. From a terminal, `wrangler deploy` creates the KV
+  // namespace. Create the database with `wrangler d1 create mailroom --binding DB` before the
+  // first `npm run deploy`, because that script applies migrations/ before it deploys.
+  "kv_namespaces": [{ "binding": "OAUTH_KV" }],
+  "d1_databases": [{ "binding": "DB", "database_name": "mailroom" }],
+
+  "vars": {
+    "APP_NAME": "Mailroom"
+  }
+  // Secret (set at deploy time, or `wrangler secret put ADMIN_PASSWORD`): ADMIN_PASSWORD
+}

@@ -1,0 +1,31 @@
+{
+  "name": "mailroom",
+  "version": "0.1.0",
+  "description": "Self-hosted Cloudflare Worker that gives Claude access to multiple Gmail / Google Workspace mailboxes.",
+  "scripts": {
+    "dev": "wrangler d1 migrations apply DB --local && wrangler dev",
+    "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy",
+    "typecheck": "tsc -p .",
+    "test": "node --test test/"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.4",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261109.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.158.0"
+  },
+  "private": true,
+  "type": "module",
+  "cloudflare": {
+    "bindings": {
+      "ADMIN_PASSWORD": {
+        "description": "A long passphrase that you choose, for example four random words. It unlocks the setup page and encrypts the stored Google credentials. **If you change it later, you must paste the Google client secret again and re-link each mailbox.**"
+      }
+    }
+  }
+}
