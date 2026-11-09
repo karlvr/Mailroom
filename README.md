@@ -131,6 +131,8 @@ The agent then has these tools:
 | `delete_event` | Deletes an event that the mailbox organizes. For an event with other guests, it needs **Allow sending calendar invitations**. It refuses an invitation from another person. |
 | `respond_to_event` | Accepts, declines or tentatively accepts an invitation. It needs **Allow RSVPs**. |
 
+For each mailbox, the Mailboxes page shows when an agent last used it. The page also shows the number of tool calls in the last 7 days, and how many of them made changes, for example to label, draft or send email. A call of a tool that has `account` counts. Other tools, such as `list_accounts`, do not use one mailbox, so they do not count.
+
 ### 5. Run one agent for each mailbox
 
 Create a scheduled task for each mailbox, for example in Claude:

@@ -1,6 +1,7 @@
 import {
   type Account,
   type AccountPermissions,
+  type AccountUsage,
   type ContextSubject,
   type ContextSummaries,
   type ContextSummary,
@@ -8,6 +9,7 @@ import {
   GLOBAL_CONTEXT,
   MAX_CONTEXT_CHARS,
   PERMISSION_LABELS,
+  USAGE_DAYS,
   accountPermissions,
   grantedScopes,
 } from "./db";
@@ -780,6 +782,7 @@ ${section(
   `<ul><li>Your Google account ID, your email address, your global context, and the times of your first and last sign-in.</li>
 <li>For each mailbox that you link: its address, its short name, its context notes, the settings <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.rsvp)}</b>, the Google permissions that you granted, and a Google refresh token. ${a} encrypts the token before it stores it.</li>
 <li>For your global context and for each mailbox: each version of the context notes that you saved or accepted, when the version became current, and who made it. For a change that an agent proposed, ${a} also stores the name of the app, and the name and the reason that the agent gave. ${a} deletes a proposal when you reject it.</li>
+<li>For each mailbox: the number of tool calls that agents made on each day, the number of those calls that made changes, and the time of the last call. When an agent uses the mailbox, ${a} deletes the counts that are older than ${USAGE_DAYS} days.</li>
 <li>Your web session, a record of each agent connection that you approve, and the version of the tool list that each connection loaded last.</li></ul>
 <p>${a} does not store the content of your email or your calendar events.</p>`,
 )}
@@ -805,7 +808,7 @@ ${section(
 )}
 ${section(
   "Remove your data",
-  `<ul><li>To unlink a mailbox, click <b>Remove</b> on the ${a} home page. ${a} deletes the stored token and the context history, and revokes the Google access of that mailbox.</li>
+  `<ul><li>To unlink a mailbox, click <b>Remove</b> on the ${a} home page. ${a} deletes the stored token, the context history and the usage counts, and revokes the Google access of that mailbox.</li>
 <li>To stop the access of an agent, remove the ${a} connector in the app of that agent.</li>
 <li>You can also revoke the access of ${a} on the <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">third-party connections</a> page of your Google account.</li>
 <li>To delete all your data, contact the operator of ${a}.</li></ul>`,
@@ -1033,6 +1036,31 @@ const userNav = (current?: "mailboxes" | "connect"): NavLink[] => [
   { href: "/connect", text: "Connect an agent", current: current === "connect" },
 ];
 
+const RELATIVE_TIME = new Intl.RelativeTimeFormat("en", { numeric: "always" });
+
+/** Returns how long before `now` a time was, for example "3 hours ago". */
+function timeAgo(ms: number, now: number): string {
+  const minutes = Math.floor((now - ms) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return RELATIVE_TIME.format(-minutes, "minute");
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return RELATIVE_TIME.format(-hours, "hour");
+  const days = Math.floor(hours / 24);
+  if (days < 30) return RELATIVE_TIME.format(-days, "day");
+  if (days < 365) return RELATIVE_TIME.format(-Math.floor(days / 30), "month");
+  return RELATIVE_TIME.format(-Math.floor(days / 365), "year");
+}
+
+/** Returns the line that shows how agents used a mailbox, for example "Used 2 hours ago · 143 calls, 12 changes in the last 7 days". */
+function usageLine(usage: AccountUsage | undefined, now: number): string {
+  if (!usage) return "No agent has used this mailbox yet";
+  const used = `Used ${timeAgo(usage.lastCallAt, now)}`;
+  if (!usage.calls) return used;
+  const calls = `${usage.calls} ${usage.calls === 1 ? "call" : "calls"}`;
+  const changes = `${usage.changes} ${usage.changes === 1 ? "change" : "changes"}`;
+  return `${used} · ${calls}, ${changes} in the last ${USAGE_DAYS} days`;
+}
+
 /** Returns the start of a context for a one-line preview. */
 function contextPreviewLine(context: string): string {
   const line = context.split("\n").find((l) => l.trim())?.trim() ?? "";
@@ -1044,6 +1072,8 @@ export function dashboardPage(
   who: string,
   accounts: Account[],
   contexts: ContextSummaries,
+  /** How agents used each account, by account ID. */
+  usage: ReadonlyMap<string, AccountUsage>,
   csrf: string,
   notices: {
     /** The messages to show at the top of the page. */
@@ -1057,6 +1087,7 @@ export function dashboardPage(
   } = {},
 ) {
   const a = esc(app);
+  const now = Date.now();
   const subject = (m: Account): ContextSubject => ({ kind: "account", accountId: m.id });
   const hasProposal = (m: Account) => contexts.accounts.get(m.id)?.hasProposal ?? false;
   /** Returns true when a mailbox has no short name or no context notes. */
@@ -1094,7 +1125,7 @@ export function dashboardPage(
     };
     return `<details class="mbx" id="mbx-${id}"${opened(m) ? " open" : ""}>
 <summary><span class="id${m.status === "ok" ? "" : " warn"}">${mailboxId(i + 1)}</span>
-<span class="who"><b>${esc(m.name || m.email)}</b>${m.name ? `<span>${esc(m.email)}</span>` : ""}</span>
+<span class="who"><b>${esc(m.name || m.email)}</b>${m.name ? `<span>${esc(m.email)}</span>` : ""}<span>${usageLine(usage.get(m.id), now)}</span></span>
 <span class="pills">${needsSetup(m) ? `<span class="pill warn">Needs setup</span>` : ""}${
       m.status === "ok" ? `<span class="pill ok">Linked</span>` : `<span class="pill warn">${ICON.warn}Needs re-linking</span>`
     }${calendar ? `<span class="pill ok">Calendar</span>` : `<span class="pill">No calendar</span>`}${onPills || `<span class="pill">Sending off</span>`}${

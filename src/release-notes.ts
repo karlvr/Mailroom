@@ -17,6 +17,7 @@ export const RELEASE_NOTES: ReleaseDay[] = [
   {
     date: "2026-11-10",
     changes: [
+      "The Mailboxes page shows when an agent last used each mailbox, and how many calls and changes agents made in the last 7 days.",
       "You can connect Claude Code, Codex and ChatGPT, as well as Claude. The Connect an agent page has the steps.",
       "The Mailboxes page shows each mailbox that still needs a name and context notes.",
       "The Mailboxes page tells you when an agent must reconnect to get new tools.",

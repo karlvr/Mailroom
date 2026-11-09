@@ -1,12 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
+import type { ShapeOutput, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+import { type CallToolResult, LATEST_PROTOCOL_VERSION, type ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { type AgentConnection, UNKNOWN_CLIENT, agentConnections, clientName } from "./clients";
 import { sha256 } from "./crypto";
 import { appName, type Env, type Props } from "./env";
 import {
   type Account,
+  type AccountCall,
   type AccountPermissions,
   type ContextAgent,
   type ContextHistory,
@@ -25,6 +27,7 @@ import {
   listAccounts,
   loadedToolLists,
   proposeContext,
+  recordAccountCall,
   recordToolList,
 } from "./db";
 import { AccountNeedsRelink, GoogleApiError, calendar, gmail, gmailUpload, hasCalendar } from "./google";
@@ -167,8 +170,19 @@ export interface McpCaller {
   clientId: string | null;
 }
 
-/** Returns an MCP server with the tools for one caller. `origin` is the origin of this Worker, for the links to its icons. */
-export function buildServer(env: Env, { props, clientId }: McpCaller, origin: string): McpServer {
+/** The work of a tool in one account. It gets the account and the arguments of the call. */
+type AccountWork<A> = (a: Account, args: A) => Promise<CallToolResult>;
+
+/**
+ * Returns an MCP server with the tools for one caller. `origin` is the origin of this Worker, for the
+ * links to its icons. The server calls `onAccountCall` after each tool call that works in one account.
+ */
+export function buildServer(
+  env: Env,
+  { props, clientId }: McpCaller,
+  origin: string,
+  onAccountCall: (call: AccountCall) => void,
+): McpServer {
   const server = new McpServer(
     {
       name: appName(env),
@@ -202,9 +216,20 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
   const permissionOff = (a: Account, key: keyof AccountPermissions) =>
     fail(`The user did not select "${PERMISSION_LABELS[key]}" for ${a.email}. The user can select it on the ${appName(env)} web page.`);
 
-  const withAccount =
-    <A extends { account: string }>(fn: (a: Account, args: A) => Promise<ReturnType<typeof text>>) =>
-    async (args: A) => {
+  /**
+   * Registers a tool that works in one account. The tool finds the account from the `account` argument,
+   * and `work` does the rest. Each call that finds the account counts in the usage of the account. A call
+   * that succeeds also counts as a change, unless the annotations of the tool have readOnlyHint.
+   */
+  const accountTool = <Shape extends ZodRawShapeCompat & { account: z.ZodString }>(
+    name: string,
+    config: { title: string; description: string; inputSchema: Shape; annotations: ToolAnnotations },
+    work: AccountWork<NoInfer<ShapeOutput<Shape>>>,
+  ) => {
+    const readOnly = config.annotations.readOnlyHint === true;
+    const call = async (input: ShapeOutput<ZodRawShapeCompat>): Promise<CallToolResult> => {
+      // The SDK checks the input against inputSchema before it calls the tool.
+      const args = input as ShapeOutput<Shape> & { account: string };
       const acct = await findAccount(env, props.userId, args.account);
       if (!acct) {
         const all = await listAccounts(env, props.userId);
@@ -214,24 +239,31 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
             : noMailboxes,
         );
       }
+      let change = false;
       try {
-        return await fn(acct, args);
+        const result = await work(acct, args);
+        change = !readOnly && !result.isError;
+        return result;
       } catch (e) {
         if (e instanceof AccountNeedsRelink || e instanceof GoogleApiError) return fail(e.message);
         throw e;
+      } finally {
+        onAccountCall({ accountId: acct.id, change });
       }
     };
+    server.registerTool<ZodRawShapeCompat, ZodRawShapeCompat>(name, config, call);
+  };
 
+  /** Returns work that runs only when the calendar of the account is linked. */
   const withCalendar =
-    <A extends { account: string }>(fn: (a: Account, args: A) => Promise<ReturnType<typeof text>>) =>
-    withAccount<A>(async (a, args) =>
+    <A>(work: AccountWork<A>): AccountWork<A> =>
+    async (a, args) =>
       hasCalendar(grantedScopes(a))
-        ? fn(a, args)
+        ? work(a, args)
         : fail(
             `Calendar is not linked for ${a.email}. The user must click Re-link for this account on the ${appName(env)} web page ` +
               `and keep the Calendar check boxes selected.`,
-          ),
-    );
+          );
 
   server.registerTool(
     "list_accounts",
@@ -278,7 +310,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
     },
   );
 
-  server.registerTool(
+  accountTool(
     "search_threads",
     {
       title: "Search threads",
@@ -294,7 +326,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    withAccount(async (a, args: { account: string; query: string; max_results: number; page_token?: string }) => {
+    async (a, args: { account: string; query: string; max_results: number; page_token?: string }) => {
       const list = await gmail<{ threads?: { id: string }[]; nextPageToken?: string; resultSizeEstimate?: number }>(
         env,
         a,
@@ -321,10 +353,10 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
         }),
       );
       return text({ account: a.email, query: args.query, threads, next_page_token: list.nextPageToken ?? null });
-    }),
+    },
   );
 
-  server.registerTool(
+  accountTool(
     "get_thread",
     {
       title: "Read thread",
@@ -336,7 +368,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    withAccount(async (a, args: { account: string; thread_id: string; max_chars_per_message: number }) => {
+    async (a, args: { account: string; thread_id: string; max_chars_per_message: number }) => {
       const t = await gmail<GmailThread>(env, a, `/threads/${encodeURIComponent(args.thread_id)}`, { query: { format: "full" } });
       const { byId } = await labelMap(env, a);
       const messages = (t.messages ?? []).map((m) => {
@@ -350,10 +382,10 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
         };
       });
       return text({ account: a.email, thread_id: t.id, messages });
-    }),
+    },
   );
 
-  server.registerTool(
+  accountTool(
     "list_labels",
     {
       title: "List labels",
@@ -361,10 +393,10 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
       inputSchema: { account: z.string() },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    withAccount(async (a) => {
+    async (a) => {
       const { byName } = await labelMap(env, a);
       return text([...byName.values()].map((l) => ({ name: l.name, type: l.type })));
-    }),
+    },
   );
 
   /** Returns who made a version of a context current. */
@@ -528,7 +560,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
     async (args: ProposalArgs) => propose(GLOBAL_CONTEXT, {}, args),
   );
 
-  server.registerTool(
+  accountTool(
     CONTEXT_TOOLS.account.read,
     {
       title: "Read context and proposal",
@@ -538,12 +570,10 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
       inputSchema: { account: z.string() },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    withAccount(async (a) =>
-      text({ account: a.email, ...contextState(await historyOf({ kind: "account", accountId: a.id })) }),
-    ),
+    async (a) => text({ account: a.email, ...contextState(await historyOf({ kind: "account", accountId: a.id })) }),
   );
 
-  server.registerTool(
+  accountTool(
     CONTEXT_TOOLS.account.propose,
     {
       title: "Propose context",
@@ -553,12 +583,11 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
       inputSchema: { account: z.string(), ...proposalInput("account") },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    withAccount(async (a, args: ProposalArgs & { account: string }) =>
+    async (a, args: ProposalArgs & { account: string }) =>
       propose({ kind: "account", accountId: a.id }, { account: a.email }, args),
-    ),
   );
 
-  server.registerTool(
+  accountTool(
     "modify_thread_labels",
     {
       title: "Label thread",
@@ -576,7 +605,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    withAccount(async (a, args: { account: string; thread_id: string; add: string[]; remove: string[] }) => {
+    async (a, args: { account: string; thread_id: string; add: string[]; remove: string[] }) => {
       const bad = [...args.add, ...args.remove].filter((n) => FORBIDDEN_LABELS.has(n.toUpperCase()));
       if (bad.length) {
         return fail(`This tool cannot add or remove these labels: ${bad.join(", ")}. To trash a thread, use trash_thread.`);
@@ -600,10 +629,10 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
         body: { addLabelIds: addIds, removeLabelIds: removeIds },
       });
       return text({ account: a.email, thread_id: args.thread_id, added: args.add, removed: args.remove });
-    }),
+    },
   );
 
-  server.registerTool(
+  accountTool(
     "create_draft",
     {
       title: "Create draft",
@@ -625,77 +654,75 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    withAccount(
-      async (
-        a,
-        args: {
-          account: string;
-          body: string;
-          reply_to_thread_id?: string;
-          to?: string;
-          cc?: string;
-          subject?: string;
-          reply_all: boolean;
-        },
-      ) => {
-        let to = args.to;
-        let cc = args.cc;
-        let subject = args.subject;
-        let inReplyTo: string | undefined;
-        let references: string | undefined;
-        let threadId: string | undefined;
-
-        if (args.reply_to_thread_id) {
-          const t = await gmail<GmailThread>(env, a, `/threads/${encodeURIComponent(args.reply_to_thread_id)}`, {
-            query: {
-              format: "metadata",
-              metadataHeaders: ["From", "To", "Cc", "Reply-To", "Subject", "Message-ID", "References"],
-            },
-          });
-          const msgs = (t.messages ?? []).filter((m) => !(m.labelIds ?? []).includes("DRAFT"));
-          const last = msgs[msgs.length - 1];
-          if (!last) return fail("That thread has no messages to reply to.");
-          const h = last.payload?.headers;
-          const self = a.email.toLowerCase();
-          const fromSelf = (header(h, "From") ?? "").toLowerCase().includes(self);
-          threadId = t.id;
-          inReplyTo = header(h, "Message-ID");
-          references = [header(h, "References"), inReplyTo].filter(Boolean).join(" ") || undefined;
-          const origSubject = header(h, "Subject") ?? "";
-          subject ??= /^re:/i.test(origSubject) ? origSubject : `Re: ${origSubject}`;
-          to ??= fromSelf ? header(h, "To") : header(h, "Reply-To") ?? header(h, "From");
-          if (args.reply_all && cc === undefined) {
-            const others = [header(h, "To"), header(h, "Cc")]
-              .filter(Boolean)
-              .join(",")
-              .split(",")
-              .map((s) => s.trim())
-              .filter((s) => s && !s.toLowerCase().includes(self) && !(to ?? "").includes(s));
-            cc = others.join(", ") || undefined;
-          }
-        }
-        if (!to) return fail("A new draft must have `to`.");
-        if (!subject) return fail("A new draft must have `subject`.");
-
-        const raw = buildRawMessage({ to, cc, subject, body: args.body, inReplyTo, references });
-        const draft = await gmail<{ id: string; message: { id: string; threadId: string } }>(env, a, "/drafts", {
-          method: "POST",
-          body: { message: { raw, ...(threadId ? { threadId } : {}) } },
-        });
-        return text({
-          account: a.email,
-          draft_id: draft.id,
-          thread_id: draft.message.threadId,
-          to,
-          cc: cc ?? null,
-          subject,
-          note: "Gmail saved the draft. The tool did not send it.",
-        });
+    async (
+      a,
+      args: {
+        account: string;
+        body: string;
+        reply_to_thread_id?: string;
+        to?: string;
+        cc?: string;
+        subject?: string;
+        reply_all: boolean;
       },
-    ),
+    ) => {
+      let to = args.to;
+      let cc = args.cc;
+      let subject = args.subject;
+      let inReplyTo: string | undefined;
+      let references: string | undefined;
+      let threadId: string | undefined;
+
+      if (args.reply_to_thread_id) {
+        const t = await gmail<GmailThread>(env, a, `/threads/${encodeURIComponent(args.reply_to_thread_id)}`, {
+          query: {
+            format: "metadata",
+            metadataHeaders: ["From", "To", "Cc", "Reply-To", "Subject", "Message-ID", "References"],
+          },
+        });
+        const msgs = (t.messages ?? []).filter((m) => !(m.labelIds ?? []).includes("DRAFT"));
+        const last = msgs[msgs.length - 1];
+        if (!last) return fail("That thread has no messages to reply to.");
+        const h = last.payload?.headers;
+        const self = a.email.toLowerCase();
+        const fromSelf = (header(h, "From") ?? "").toLowerCase().includes(self);
+        threadId = t.id;
+        inReplyTo = header(h, "Message-ID");
+        references = [header(h, "References"), inReplyTo].filter(Boolean).join(" ") || undefined;
+        const origSubject = header(h, "Subject") ?? "";
+        subject ??= /^re:/i.test(origSubject) ? origSubject : `Re: ${origSubject}`;
+        to ??= fromSelf ? header(h, "To") : header(h, "Reply-To") ?? header(h, "From");
+        if (args.reply_all && cc === undefined) {
+          const others = [header(h, "To"), header(h, "Cc")]
+            .filter(Boolean)
+            .join(",")
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s && !s.toLowerCase().includes(self) && !(to ?? "").includes(s));
+          cc = others.join(", ") || undefined;
+        }
+      }
+      if (!to) return fail("A new draft must have `to`.");
+      if (!subject) return fail("A new draft must have `subject`.");
+
+      const raw = buildRawMessage({ to, cc, subject, body: args.body, inReplyTo, references });
+      const draft = await gmail<{ id: string; message: { id: string; threadId: string } }>(env, a, "/drafts", {
+        method: "POST",
+        body: { message: { raw, ...(threadId ? { threadId } : {}) } },
+      });
+      return text({
+        account: a.email,
+        draft_id: draft.id,
+        thread_id: draft.message.threadId,
+        to,
+        cc: cc ?? null,
+        subject,
+        note: "Gmail saved the draft. The tool did not send it.",
+      });
+    },
   );
 
-  server.registerTool(
+  accountTool(
     "create_forward_draft",
     {
       title: "Draft a forward",
@@ -716,81 +743,79 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    withAccount(
-      async (
-        a,
-        args: { account: string; message_id: string; to: string; cc?: string; note?: string; include_attachments: boolean },
-      ) => {
-        const m = await gmail<GmailMessage>(env, a, `/messages/${encodeURIComponent(args.message_id)}`, {
-          query: { format: "full" },
-        });
-        if (!m.payload) return fail("Gmail returned no content for that message.");
-        const h = m.payload.headers;
+    async (
+      a,
+      args: { account: string; message_id: string; to: string; cc?: string; note?: string; include_attachments: boolean },
+    ) => {
+      const m = await gmail<GmailMessage>(env, a, `/messages/${encodeURIComponent(args.message_id)}`, {
+        query: { format: "full" },
+      });
+      if (!m.payload) return fail("Gmail returned no content for that message.");
+      const h = m.payload.headers;
 
-        const parts = args.include_attachments
-          ? attachmentParts(m.payload).filter((p) => p.body?.data || p.body?.attachmentId)
-          : [];
-        const bytes = parts.reduce((n, p) => n + (p.body?.size ?? 0), 0);
-        if (bytes > MAX_FORWARD_ATTACHMENT_MB * 1024 * 1024) {
-          return fail(
-            `The attachments of this message are ${(bytes / 1024 / 1024).toFixed(1)} MB in total. ` +
-              `${appName(env)} can forward at most ${MAX_FORWARD_ATTACHMENT_MB} MB of attachments. ` +
-              "To forward the message without its attachments, set include_attachments to false.",
-          );
-        }
-        const attachments: MimeAttachment[] = await Promise.all(
-          parts.map(async (p) => {
-            const data =
-              p.body?.data ??
-              (
-                await gmail<{ data: string }>(
-                  env,
-                  a,
-                  `/messages/${encodeURIComponent(m.id)}/attachments/${encodeURIComponent(p.body!.attachmentId!)}`,
-                )
-              ).data;
-            return { filename: p.filename ?? "attachment", mimeType: p.mimeType ?? "", base64: toBase64(data) };
-          }),
+      const parts = args.include_attachments
+        ? attachmentParts(m.payload).filter((p) => p.body?.data || p.body?.attachmentId)
+        : [];
+      const bytes = parts.reduce((n, p) => n + (p.body?.size ?? 0), 0);
+      if (bytes > MAX_FORWARD_ATTACHMENT_MB * 1024 * 1024) {
+        return fail(
+          `The attachments of this message are ${(bytes / 1024 / 1024).toFixed(1)} MB in total. ` +
+            `${appName(env)} can forward at most ${MAX_FORWARD_ATTACHMENT_MB} MB of attachments. ` +
+            "To forward the message without its attachments, set include_attachments to false.",
         );
+      }
+      const attachments: MimeAttachment[] = await Promise.all(
+        parts.map(async (p) => {
+          const data =
+            p.body?.data ??
+            (
+              await gmail<{ data: string }>(
+                env,
+                a,
+                `/messages/${encodeURIComponent(m.id)}/attachments/${encodeURIComponent(p.body!.attachmentId!)}`,
+              )
+            ).data;
+          return { filename: p.filename ?? "attachment", mimeType: p.mimeType ?? "", base64: toBase64(data) };
+        }),
+      );
 
-        const messageId = header(h, "Message-ID");
-        const subject = forwardSubject(header(h, "Subject"));
-        const message = buildMessage({
-          to: args.to,
-          cc: args.cc,
-          subject,
-          body: forwardText(args.note, {
-            from: header(h, "From"),
-            date: header(h, "Date"),
-            subject: header(h, "Subject"),
-            to: header(h, "To"),
-            cc: header(h, "Cc"),
-            text: extractBody(m.payload).text,
-          }),
-          inReplyTo: messageId,
-          references: [header(h, "References"), messageId].filter(Boolean).join(" ") || undefined,
-          attachments,
-        });
-        // The upload API takes the message as it is, so a large attachment does not have to fit in a JSON field.
-        const draft = await gmailUpload<{ id: string; message: { id: string; threadId: string } }>(env, a, "/drafts", {
-          metadata: { message: { threadId: m.threadId } },
-          message,
-        });
-        return text({
-          account: a.email,
-          draft_id: draft.id,
-          thread_id: draft.message.threadId,
-          to: args.to,
-          cc: args.cc ?? null,
-          subject,
-          attachments: attachments.map((f) => f.filename),
-          note: "Gmail saved the forward as a draft. The tool did not send it.",
-        });
-      },
-    ),
+      const messageId = header(h, "Message-ID");
+      const subject = forwardSubject(header(h, "Subject"));
+      const message = buildMessage({
+        to: args.to,
+        cc: args.cc,
+        subject,
+        body: forwardText(args.note, {
+          from: header(h, "From"),
+          date: header(h, "Date"),
+          subject: header(h, "Subject"),
+          to: header(h, "To"),
+          cc: header(h, "Cc"),
+          text: extractBody(m.payload).text,
+        }),
+        inReplyTo: messageId,
+        references: [header(h, "References"), messageId].filter(Boolean).join(" ") || undefined,
+        attachments,
+      });
+      // The upload API takes the message as it is, so a large attachment does not have to fit in a JSON field.
+      const draft = await gmailUpload<{ id: string; message: { id: string; threadId: string } }>(env, a, "/drafts", {
+        metadata: { message: { threadId: m.threadId } },
+        message,
+      });
+      return text({
+        account: a.email,
+        draft_id: draft.id,
+        thread_id: draft.message.threadId,
+        to: args.to,
+        cc: args.cc ?? null,
+        subject,
+        attachments: attachments.map((f) => f.filename),
+        note: "Gmail saved the forward as a draft. The tool did not send it.",
+      });
+    },
   );
 
-  server.registerTool(
+  accountTool(
     "send_draft",
     {
       title: "Send draft",
@@ -804,17 +829,17 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
-    withAccount(async (a, args: { account: string; draft_id: string }) => {
+    async (a, args: { account: string; draft_id: string }) => {
       if (!accountPermissions(a).sendEmail) return permissionOff(a, "sendEmail");
       const sent = await gmail<{ id: string; threadId: string }>(env, a, "/drafts/send", {
         method: "POST",
         body: { id: args.draft_id },
       });
       return text({ account: a.email, message_id: sent.id, thread_id: sent.threadId, note: "Gmail sent the draft." });
-    }),
+    },
   );
 
-  server.registerTool(
+  accountTool(
     "trash_thread",
     {
       title: "Trash thread",
@@ -824,10 +849,10 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
       inputSchema: { account: z.string(), thread_id: z.string() },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
-    withAccount(async (a, args: { account: string; thread_id: string }) => {
+    async (a, args: { account: string; thread_id: string }) => {
       await gmail(env, a, `/threads/${encodeURIComponent(args.thread_id)}/trash`, { method: "POST" });
       return text({ account: a.email, thread_id: args.thread_id, note: "Gmail moved the thread to the trash." });
-    }),
+    },
   );
 
   // ---------- calendar ----------
@@ -856,7 +881,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
     `/calendars/${encodeURIComponent(calendarId)}/events${eventId ? `/${encodeURIComponent(eventId)}` : ""}`;
   const sendUpdates = (notify: boolean) => (notify ? "all" : "none");
 
-  server.registerTool(
+  accountTool(
     "list_calendars",
     {
       title: "List calendars",
@@ -881,7 +906,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
     }),
   );
 
-  server.registerTool(
+  accountTool(
     "list_events",
     {
       title: "List events",
@@ -947,7 +972,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
     ),
   );
 
-  server.registerTool(
+  accountTool(
     "get_event",
     {
       title: "Read event",
@@ -966,7 +991,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
     }),
   );
 
-  server.registerTool(
+  accountTool(
     "query_free_busy",
     {
       title: "Find busy times",
@@ -1010,7 +1035,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
     ),
   );
 
-  server.registerTool(
+  accountTool(
     "create_event",
     {
       title: "Create event",
@@ -1080,7 +1105,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
     ),
   );
 
-  server.registerTool(
+  accountTool(
     "update_event",
     {
       title: "Change event",
@@ -1157,7 +1182,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
     ),
   );
 
-  server.registerTool(
+  accountTool(
     "delete_event",
     {
       title: "Delete event",
@@ -1189,7 +1214,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
     }),
   );
 
-  server.registerTool(
+  accountTool(
     "respond_to_event",
     {
       title: "RSVP to invitation",
@@ -1240,7 +1265,7 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
 }
 
 /** Stateless Streamable HTTP: a fresh server per request, JSON responses. */
-export async function handleMcp(req: Request, env: Env, caller: McpCaller): Promise<Response> {
+export async function handleMcp(req: Request, env: Env, caller: McpCaller, ctx: ExecutionContext): Promise<Response> {
   const { props } = caller;
   // A token stays valid after its owner leaves the allowlist, so check the list on every request.
   if (!isAllowed(await getAllowlist(env), props.email)) {
@@ -1253,15 +1278,18 @@ export async function handleMcp(req: Request, env: Env, caller: McpCaller): Prom
   // An agent app keeps the tool list from the time that it connected. Record the tool list that each
   // client loads, so that Mailroom can find the clients that must reconnect to get new tools.
   const listingClient = caller.clientId !== null && (await isToolListRequest(req)) ? caller.clientId : null;
-  const transport = await connectedTransport(env, caller, new URL(req.url).origin);
+  // Record the use of an account after the response, so that the database write does not delay the agent.
+  const recordCall = (call: AccountCall) =>
+    ctx.waitUntil(recordAccountCall(env, call).catch((e) => console.error("Mailroom could not record the use of an account", e)));
+  const transport = await connectedTransport(env, caller, new URL(req.url).origin, recordCall);
   const res = await transport.handleRequest(req);
   if (listingClient && res.ok) await recordToolList(env, props.userId, listingClient, (await toolCatalog(env)).fingerprint);
   return res;
 }
 
 /** Returns a transport for one request, connected to a new MCP server for the caller. */
-async function connectedTransport(env: Env, caller: McpCaller, origin: string) {
-  const server = buildServer(env, caller, origin);
+async function connectedTransport(env: Env, caller: McpCaller, origin: string, onAccountCall: (call: AccountCall) => void) {
+  const server = buildServer(env, caller, origin, onAccountCall);
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
@@ -1308,7 +1336,8 @@ async function makeCatalog(env: Env): Promise<ToolCatalog> {
   const caller: McpCaller = { props: { userId: "", email: "" }, clientId: null };
   const origin = "https://mailroom.invalid";
   const call = async (method: string, params: object) => {
-    const transport = await connectedTransport(env, caller, origin);
+    // The catalog calls no tools, so it records no use of an account.
+    const transport = await connectedTransport(env, caller, origin, () => {});
     const res = await transport.handleRequest(
       new Request(`${origin}/mcp`, {
         method: "POST",

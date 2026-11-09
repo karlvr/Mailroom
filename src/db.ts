@@ -264,10 +264,66 @@ export async function deleteAccount(env: Env, userId: string, id: string): Promi
   if (acct) {
     await env.DB.batch([
       env.DB.prepare("DELETE FROM context_versions WHERE account_id = ?").bind(versionKey(userId, { kind: "account", accountId: id })),
+      env.DB.prepare("DELETE FROM account_usage WHERE account_id = ?").bind(id),
       env.DB.prepare("DELETE FROM accounts WHERE id = ? AND user_id = ?").bind(id, userId),
     ]);
   }
   return acct;
+}
+
+// ---------- account usage ----------
+
+/** The number of days, today included, that the usage counts of an account cover. */
+export const USAGE_DAYS = 7;
+
+const DAY_MS = 24 * 3600 * 1000;
+
+/** Returns the UTC date of a time, as YYYY-MM-DD. */
+const utcDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+
+/** Returns the first UTC date of the usage window that ends on the date of `now`. */
+const usageStart = (now: number) => utcDay(now - (USAGE_DAYS - 1) * DAY_MS);
+
+/** A tool call that an agent made in one account. */
+export interface AccountCall {
+  accountId: string;
+  /** True when the call counts as a change: the tool can change data, and the call succeeded. */
+  change: boolean;
+}
+
+/** How agents used an account. */
+export interface AccountUsage {
+  /** The time of the latest tool call, in milliseconds since the epoch. */
+  lastCallAt: number;
+  /** The number of tool calls in the last USAGE_DAYS days. */
+  calls: number;
+  /** The number of those calls that count as a change. */
+  changes: number;
+}
+
+/** Counts a tool call in the usage of its account, and deletes the days of that account that are before the usage window. */
+export async function recordAccountCall(env: Env, call: AccountCall): Promise<void> {
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO account_usage (account_id, day, calls, changes, last_at) VALUES (?, ?, 1, ?, ?)
+       ON CONFLICT(account_id, day) DO UPDATE SET
+         calls = calls + 1, changes = changes + excluded.changes, last_at = max(last_at, excluded.last_at)`,
+    ).bind(call.accountId, utcDay(now), call.change ? 1 : 0, now),
+    env.DB.prepare("DELETE FROM account_usage WHERE account_id = ? AND day < ?").bind(call.accountId, usageStart(now)),
+  ]);
+}
+
+/** Returns the usage of each account of the user, by account ID. An account that no agent used has no entry. */
+export async function accountUsage(env: Env, userId: string): Promise<Map<string, AccountUsage>> {
+  const start = usageStart(Date.now());
+  const { results } = await env.DB.prepare(
+    `SELECT u.account_id, MAX(u.last_at) AS last_at, SUM(u.calls * (u.day >= ?)) AS calls, SUM(u.changes * (u.day >= ?)) AS changes
+     FROM account_usage u JOIN accounts a ON a.id = u.account_id WHERE a.user_id = ? GROUP BY u.account_id`,
+  )
+    .bind(start, start, userId)
+    .all<{ account_id: string; last_at: number; calls: number; changes: number }>();
+  return new Map(results.map((r) => [r.account_id, { lastCallAt: r.last_at, calls: r.calls, changes: r.changes }]));
 }
 
 // ---------- context history ----------

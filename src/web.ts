@@ -5,6 +5,7 @@ import {
   type AccountPermissions,
   type ContextSubject,
   GLOBAL_CONTEXT,
+  accountUsage,
   contextHistory,
   contextSummaries,
   decideProposal,
@@ -197,13 +198,14 @@ async function home(req: Request, env: Env, origin: string, app: string) {
   const messages = messageCodes(params.getAll("msg"));
   const accounts = await listAccounts(env, session.userId);
   const contexts = await contextSummaries(env, session.userId);
+  const usage = await accountUsage(env, session.userId);
   const setupOutdated = (await getSetupVersion(env)) < SETUP_VERSION;
   // The warning is not essential, so the page shows without it when Mailroom cannot list the connections.
   const outdated = await outdatedConnections(env, session.userId).catch((e) => {
     console.error("Mailroom could not list the outdated agent connections", e);
     return [];
   });
-  return dashboardPage(app, session.email, accounts, contexts, session.csrf, {
+  return dashboardPage(app, session.email, accounts, contexts, usage, session.csrf, {
     messages,
     setupOutdated,
     outdatedConnections: outdated,
