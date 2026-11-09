@@ -28,6 +28,7 @@ import {
   updateAccountDetails,
   upsertUser,
 } from "./db";
+import { outdatedConnections } from "./mcp";
 import { GMAIL_SCOPE, authorizeUrl, exchangeCode, hasCalendar, pkcePair, revokeToken } from "./google";
 import {
   APP_ICONS,
@@ -194,7 +195,16 @@ async function home(req: Request, env: Env, origin: string, app: string) {
   const accounts = await listAccounts(env, session.userId);
   const contexts = await contextSummaries(env, session.userId);
   const setupOutdated = (await getSetupVersion(env)) < SETUP_VERSION;
-  return dashboardPage(app, origin, session.email, accounts, contexts, session.csrf, { messages, setupOutdated });
+  // The warning is not essential, so the page shows without it when Mailroom cannot list the connections.
+  const outdated = await outdatedConnections(env, session.userId).catch((e) => {
+    console.error("Mailroom could not list the outdated Claude connections", e);
+    return [];
+  });
+  return dashboardPage(app, origin, session.email, accounts, contexts, session.csrf, {
+    messages,
+    setupOutdated,
+    outdatedConnections: outdated,
+  });
 }
 
 async function setupGet(

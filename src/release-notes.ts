@@ -17,6 +17,8 @@ export const RELEASE_NOTES: ReleaseDay[] = [
   {
     date: "2026-11-10",
     changes: [
+      "The Mailboxes page tells you when Claude must reconnect to get new tools.",
+      "Claude can tell you what changed, from these release notes.",
       "You can write a global context with notes that apply to every mailbox.",
       "Claude can propose changes to a context. You accept, edit or reject each proposal.",
       "Each context keeps a history, so you can compare and restore earlier versions.",

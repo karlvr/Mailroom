@@ -97,6 +97,7 @@ Claude then has these tools:
 | Tool | What it does |
 | --- | --- |
 | `list_accounts` | Lists the mailboxes, with the name, the context notes and the settings of each mailbox, and the global context |
+| `about_mailroom` | Gives the release notes, the names of the current tools, and whether the tool list of Claude is up to date |
 | `get_global_context` | Reads the live global context and the proposal that waits for you, if any |
 | `propose_global_context` | Proposes a new global context. The global context has at most one proposal, and a new proposal replaces it. The global context changes only when you accept the proposal on the Mailroom web page. |
 | `get_context` | Reads the live context of a mailbox and the proposal that waits for you, if any |
@@ -189,7 +190,7 @@ Each person must trust the operator of the deployment, because the operator can 
 
 An update keeps your `ADMIN_PASSWORD`, your settings and your linked mailboxes. `npm run deploy` applies new database migrations before it deploys the new code.
 
-To see what an update changes, open **Release notes** in the footer of each page, or go to `/release-notes`. When an update adds tools, Claude gets the new tools only after you reconnect Mailroom: in Claude, open **Customize → Connectors**, disconnect Mailroom, and then connect it again.
+To see what an update changes, open **Release notes** in the footer of each page, or go to `/release-notes`. When an update adds or changes tools, Claude gets the new tools only after you reconnect Mailroom: in Claude, open **Customize → Connectors**, disconnect Mailroom, and then connect it again. Until then, the Mailboxes page shows a warning that names each Claude connection with the old tools, and `list_accounts` asks Claude to tell you.
 
 An update can add a setup step or change one. Then the Mailboxes page shows a notice until the admin completes the new steps. To complete them:
 

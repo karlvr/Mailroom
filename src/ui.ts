@@ -12,6 +12,7 @@ import {
   grantedScopes,
 } from "./db";
 import { diffWords } from "./diff";
+import { type ClaudeConnection, clientHost } from "./clients";
 import { RELEASE_NOTES } from "./release-notes";
 import { hasCalendar } from "./google";
 
@@ -924,16 +925,6 @@ function authorHtml(v: ContextVersion, viewer: string): string {
   }`;
 }
 
-/** Returns the host of an OAuth client ID that is a URL, which the OAuth provider verified. Returns null for other client IDs. */
-function clientHost(clientId: string | null): string | null {
-  if (!clientId?.startsWith("https://")) return null;
-  try {
-    return new URL(clientId).host;
-  } catch {
-    return null;
-  }
-}
-
 /** What the history knows about the versions around a version, for its description. */
 interface ChangeRefs {
   /** Returns the number of a version in the history, or undefined when the history is not at hand. */
@@ -1009,6 +1000,22 @@ editButton.addEventListener('click',()=>{show('edit');tabs.parentElement.scrollI
 show('diff');
 })`;
 
+/** Returns a warning that names the Claude connections with an old tool list, or nothing when there are none. */
+function outdatedHtml(app: string, connections: readonly ClaudeConnection[]): string {
+  if (!connections.length) return "";
+  const a = esc(app);
+  const names = connections
+    .map((c) => {
+      const host = clientHost(c.clientId);
+      return `<b>${esc(c.name)}</b>${host ? ` (${esc(host)})` : ""}`;
+    })
+    .join(", ");
+  const which = connections.length === 1 ? "This Claude connection has" : "These Claude connections have";
+  return warning(
+    `${a} has new or changed tools. ${which} the old tools: ${names}. To get the new tools, reconnect ${a}: in Claude, open <b>Customize → Connectors</b>, disconnect ${a}, and then connect it again. <a href="/release-notes">See what changed</a>`,
+  );
+}
+
 /** Returns the line under a context: when the context changed, by whom, and a link to its history. */
 function contextMeta(subject: ContextSubject, summary: ContextSummary | null | undefined, viewer: string): string {
   if (!summary?.latest) return "";
@@ -1032,6 +1039,8 @@ export function dashboardPage(
     messages?: readonly MessageCode[];
     /** True when this version has setup steps that the admin did not complete. */
     setupOutdated?: boolean;
+    /** The Claude connections that do not have the current tool list. */
+    outdatedConnections?: readonly ClaudeConnection[];
   } = {},
 ) {
   const a = esc(app);
@@ -1111,6 +1120,7 @@ ${
     ? warning(`This version of ${a} needs a new setup step. The admin must open the <a href="/setup">setup page</a> and do the steps marked New. Until then, some tools can fail.`)
     : ""
 }
+${outdatedHtml(app, notices.outdatedConnections ?? [])}
 <section class="sect" id="global">
 <div class="rule"><span class="n">01</span><span>Global context</span><span class="end">Every mailbox</span></div>
 <div class="panel raised ticks">

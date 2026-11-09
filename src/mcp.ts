@@ -1,6 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { type ClaudeConnection, UNKNOWN_CLIENT, claudeConnections, clientName } from "./clients";
+import { sha256 } from "./crypto";
 import { appName, type Env, type Props } from "./env";
 import {
   type Account,
@@ -20,7 +23,9 @@ import {
   grantedScopes,
   isAllowed,
   listAccounts,
+  loadedToolLists,
   proposeContext,
+  recordToolList,
 } from "./db";
 import { AccountNeedsRelink, GoogleApiError, calendar, gmail, gmailUpload, hasCalendar } from "./google";
 import {
@@ -48,6 +53,7 @@ import {
   summariseEvent,
   toEventTime,
 } from "./calendar";
+import { RELEASE_NOTES } from "./release-notes";
 import { APP_ICONS } from "./ui";
 
 // Labels that a label change must not add or remove. trash_thread and send_draft are the only
@@ -84,6 +90,9 @@ interface ProposalArgs {
 }
 
 const WEEK_MS = 7 * 24 * 3600 * 1000;
+
+// The largest number of days of release notes that about_mailroom gives.
+const MAX_RELEASE_DAYS = 10;
 
 // The largest total size of the attachments that a forward copies. Mailroom holds the attachments in
 // Worker memory while it builds the draft, so the limit is lower than the Gmail limit.
@@ -183,6 +192,13 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
 
   const noMailboxes = `The user has no linked mailboxes. The user can link a mailbox on the ${appName(env)} web page.`;
 
+  /** Returns true when the calling client loaded the current tool list, and null when the client ID is not known. */
+  const toolsUpToDate = async (): Promise<boolean | null> => {
+    if (!clientId) return null;
+    const [catalog, loaded] = await Promise.all([toolCatalog(env), loadedToolLists(env, props.userId)]);
+    return loaded.get(clientId) === catalog.fingerprint;
+  };
+
   const permissionOff = (a: Account, key: keyof AccountPermissions) =>
     fail(`The user did not select "${PERMISSION_LABELS[key]}" for ${a.email}. The user can select it on the ${appName(env)} web page.`);
 
@@ -237,14 +253,24 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
         "context is the live context of the account, the only context of the account that is in effect. " +
         "context_proposal_waits is true when a proposal from propose_context waits for the user to accept or reject it. " +
         "To read the proposal, call get_context. " +
+        "notice is present when Mailroom has a message for the user, for example that the user must reconnect Mailroom to get new tools. " +
+        "Give the notice to the user. " +
         "Call this tool first.",
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
       const accounts = await listAccounts(env, props.userId);
       if (!accounts.length) return text(noMailboxes);
-      const contexts = await contextSummaries(env, props.userId);
+      const [contexts, upToDate] = await Promise.all([contextSummaries(env, props.userId), toolsUpToDate()]);
       return text({
+        ...(upToDate === false
+          ? {
+              notice:
+                `${appName(env)} changed its tools since Claude loaded them. Tell the user to reconnect ${appName(env)} to get the new tools: ` +
+                `in Claude, open Customize → Connectors, disconnect ${appName(env)}, and then connect it again. ` +
+                `To read what changed, call about_mailroom if you have it, or open ${origin}/release-notes.`,
+            }
+          : {}),
         global_context: contexts.global.context || null,
         global_context_proposal_waits: contexts.global.summary?.hasProposal ?? false,
         accounts: accounts.map((a) => describeAccount(a, contexts.accounts.get(a.id)?.hasProposal ?? false)),
@@ -432,10 +458,9 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
         `Proposal ${replaces} does not wait for the user. The user accepted or rejected it, or another agent replaced it. ${reread}`,
       );
     }
-    const client = clientId ? await env.OAUTH_PROVIDER.lookupClient(clientId) : null;
     const agent: ContextAgent = {
       clientId,
-      clientName: client?.clientName?.trim() || "Unknown app",
+      clientName: clientId ? await clientName(env, clientId) : UNKNOWN_CLIENT,
       label: args.agent_label?.trim() || null,
     };
     const id = await proposeContext(env, props.userId, subject, { context: args.context, reason: args.reason.trim(), agent, replaces });
@@ -450,6 +475,31 @@ export function buildServer(env: Env, { props, clientId }: McpCaller, origin: st
         "Until then, follow only the live context.",
     });
   };
+
+  server.registerTool(
+    "about_mailroom",
+    {
+      title: `About ${appName(env)}`,
+      description:
+        `Read about ${appName(env)}: its release notes, the names of its current tools, and whether your tool list is up to date. ` +
+        `Call this tool when the user asks about ${appName(env)} or what changed in it, when list_accounts gives a notice, ` +
+        "or when you need a tool that you do not have. Tell the user about the changes briefly, in plain words. " +
+        "When tools_up_to_date is false, Claude has an old tool list. Then tell the user to reconnect: " +
+        `in Claude, open Customize → Connectors, disconnect ${appName(env)}, and then connect it again.`,
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async () => {
+      const [catalog, upToDate] = await Promise.all([toolCatalog(env), toolsUpToDate()]);
+      return text({
+        app: appName(env),
+        web_page: origin,
+        release_notes_page: `${origin}/release-notes`,
+        tools_up_to_date: upToDate,
+        tools: catalog.names,
+        release_notes: RELEASE_NOTES.slice(0, MAX_RELEASE_DAYS),
+      });
+    },
+  );
 
   server.registerTool(
     CONTEXT_TOOLS.global.read,
@@ -1199,11 +1249,97 @@ export async function handleMcp(req: Request, env: Env, caller: McpCaller): Prom
     // No server-initiated streams or sessions in stateless mode.
     return new Response(null, { status: 405, headers: { Allow: "POST" } });
   }
-  const server = buildServer(env, caller, new URL(req.url).origin);
+  // Claude keeps the tool list from the time that it connected. Record the tool list that each client
+  // loads, so that Mailroom can find the clients that must reconnect to get new tools.
+  const listingClient = caller.clientId !== null && (await isToolListRequest(req)) ? caller.clientId : null;
+  const transport = await connectedTransport(env, caller, new URL(req.url).origin);
+  const res = await transport.handleRequest(req);
+  if (listingClient && res.ok) await recordToolList(env, props.userId, listingClient, (await toolCatalog(env)).fingerprint);
+  return res;
+}
+
+/** Returns a transport for one request, connected to a new MCP server for the caller. */
+async function connectedTransport(env: Env, caller: McpCaller, origin: string) {
+  const server = buildServer(env, caller, origin);
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
   });
   await server.connect(transport);
-  return transport.handleRequest(req);
+  return transport;
+}
+
+/** Returns true when an MCP request body asks for the tool list. */
+async function isToolListRequest(req: Request): Promise<boolean> {
+  try {
+    const body: unknown = await req.clone().json();
+    return [body].flat().some((m) => (m as { method?: unknown } | null)?.method === "tools/list");
+  } catch {
+    return false;
+  }
+}
+
+/** The tool list of this version of Mailroom, as Claude gets it when it connects. */
+export interface ToolCatalog {
+  /** The names of the tools. */
+  names: string[];
+  /** A hash of the server instructions and the full tool list. Any change to them changes the fingerprint. */
+  fingerprint: string;
+}
+
+// The catalog depends only on the code and the app name, so each isolate makes it once.
+const catalogs = new Map<string, Promise<ToolCatalog>>();
+
+/** Returns the tool list of this version of Mailroom. */
+export function toolCatalog(env: Env): Promise<ToolCatalog> {
+  const key = appName(env);
+  let catalog = catalogs.get(key);
+  if (!catalog) {
+    catalog = makeCatalog(env);
+    catalogs.set(key, catalog);
+    catalog.catch(() => catalogs.delete(key));
+  }
+  return catalog;
+}
+
+async function makeCatalog(env: Env): Promise<ToolCatalog> {
+  // The instructions and the tools do not depend on the caller or the origin.
+  const caller: McpCaller = { props: { userId: "", email: "" }, clientId: null };
+  const origin = "https://mailroom.invalid";
+  const call = async (method: string, params: object) => {
+    const transport = await connectedTransport(env, caller, origin);
+    const res = await transport.handleRequest(
+      new Request(`${origin}/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      }),
+    );
+    const reply = (await res.json()) as { result?: Record<string, unknown>; error?: { message: string } };
+    if (!reply.result) throw new Error(`The MCP server failed the ${method} request: ${reply.error?.message ?? res.status}`);
+    return reply.result;
+  };
+  const init = await call("initialize", {
+    protocolVersion: LATEST_PROTOCOL_VERSION,
+    capabilities: {},
+    clientInfo: { name: "mailroom-catalog", version: "1.0.0" },
+  });
+  const tools = (await call("tools/list", {})).tools as { name: string }[];
+  return {
+    names: tools.map((t) => t.name),
+    fingerprint: await sha256(JSON.stringify({ instructions: init.instructions, tools })),
+  };
+}
+
+/**
+ * Returns the current Claude connections of the user that do not have the current tool list: each one
+ * loaded an older tool list, or Mailroom has no record of its tool list.
+ */
+export async function outdatedConnections(env: Env, userId: string): Promise<ClaudeConnection[]> {
+  const [catalog, loaded, connections] = await Promise.all([
+    toolCatalog(env),
+    loadedToolLists(env, userId),
+    claudeConnections(env, userId),
+  ]);
+  return connections.filter((c) => loaded.get(c.clientId) !== catalog.fingerprint);
 }

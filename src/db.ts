@@ -93,6 +93,26 @@ export async function upsertUser(env: Env, id: string, email: string): Promise<v
     .run();
 }
 
+// ---------- tool lists ----------
+
+/** Records that a Claude connection of the user, identified by its OAuth client ID, loaded the tool list with `fingerprint`. */
+export async function recordToolList(env: Env, userId: string, clientId: string, fingerprint: string): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO tool_lists (user_id, client_id, fingerprint, listed_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(user_id, client_id) DO UPDATE SET fingerprint = excluded.fingerprint, listed_at = excluded.listed_at`,
+  )
+    .bind(userId, clientId, fingerprint, Date.now())
+    .run();
+}
+
+/** Returns the fingerprint of the tool list that each Claude connection of the user loaded last, by OAuth client ID. */
+export async function loadedToolLists(env: Env, userId: string): Promise<Map<string, string>> {
+  const { results } = await env.DB.prepare("SELECT client_id, fingerprint FROM tool_lists WHERE user_id = ?")
+    .bind(userId)
+    .all<{ client_id: string; fingerprint: string }>();
+  return new Map(results.map((r) => [r.client_id, r.fingerprint]));
+}
+
 // ---------- accounts ----------
 
 export interface Account {
