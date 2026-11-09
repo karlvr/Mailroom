@@ -94,7 +94,8 @@ Claude then has these tools:
 | Tool | What it does |
 | --- | --- |
 | `list_accounts` | Lists the mailboxes, with the name, the context notes and the settings of each mailbox |
-| `propose_context` | Proposes new context notes for a mailbox. The context changes only when you accept the proposal on the Mailroom web page. |
+| `get_context` | Reads the live context of a mailbox and the proposal that waits for you, if any |
+| `propose_context` | Proposes new context notes for a mailbox. A mailbox has at most one proposal, and a new proposal replaces it. The context changes only when you accept the proposal on the Mailroom web page. |
 | `search_threads` | Searches one mailbox with Gmail search syntax |
 | `get_thread` | Reads a whole thread as plain text |
 | `list_labels` | Lists the labels of one mailbox |
@@ -140,15 +141,17 @@ Select a setting only for a mailbox where you accept this risk. Claude can alway
 
 Mailroom instructs Claude to follow the context notes of a mailbox as your instructions. For this reason, Claude cannot change the context. Claude can only propose a change with `propose_context`, for example when you tell a scheduled task to keep the context up to date. The context changes only when you accept the proposal.
 
+A mailbox has at most one proposal. With `get_context`, Claude reads the live context and the proposal that waits, if any. Mailroom instructs Claude to follow only the live context. When a proposal waits, Claude starts from its text and replaces it, and keeps its changes unless you instructed otherwise. Mailroom refuses a new proposal that does not start from the proposal that waits, so an agent cannot drop the changes of another agent without reading them. So you always review one proposal with all the changes.
+
 When a mailbox has a proposal, the mailboxes page shows a notice for that mailbox. On the **History** page of the mailbox, you can do these actions:
 
-- See each proposal and its changes from the current context. Then accept or reject it. Mailroom deletes a rejected proposal.
+- See the proposal and its changes from the current context. Then accept or reject it. Mailroom deletes a rejected proposal.
 - Edit a proposal before you accept it. On the **Edit** tab, change the text. **Accept** then becomes **Accept with edits**, and **Revert to the agent's text** undoes your edits. The **Diff** tab shows the changes with your edits. When you accept with edits, the history keeps the agent's text and then your text, and only your text becomes the current context.
 - See each earlier version of the context, with the time and the person or the agent that made it. For a version from an agent, the history also shows the person who accepted it.
 - Compare a version with the previous version, the next version or the current version.
 - Restore an earlier version. The restored text becomes a new version, so the history keeps every step.
 
-For a change from an agent, Mailroom records the name of the app from the Claude connection that you approved. The agent also gives its own name, for example the name of the scheduled task, and a reason. Mailroom cannot verify the name and the reason that the agent gives. A mailbox can have at most 10 proposals that wait for a decision.
+For a change from an agent, Mailroom records the name of the app from the Claude connection that you approved. The agent also gives its own name, for example the name of the scheduled task, and a reason. Mailroom cannot verify the name and the reason that the agent gives. When an agent replaces a proposal, the proposal shows the name of the last agent.
 
 ## Access control
 

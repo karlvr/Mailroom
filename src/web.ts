@@ -400,11 +400,11 @@ async function contextGet(req: Request, env: Env, app: string, id: string) {
   if (!session) return redirect(`/login?next=${encodeURIComponent(url.pathname + url.search)}`);
   const account = (await listAccounts(env, session.userId)).find((a) => a.id === id);
   if (!account) return messagePage(app, "Not found", "This mailbox does not exist, or it is not yours.", { href: "/", text: "Home page" });
-  const { versions, proposals } = await contextHistory(env, session.userId, id);
+  const { versions, proposal } = await contextHistory(env, session.userId, id);
   const compare = url.searchParams.get("compare");
   return contextPage(app, session.email, account, {
     versions,
-    proposals,
+    proposal,
     selectedId: Number(url.searchParams.get("v")) || undefined,
     compare: compare === "text" || compare === "next" || compare === "current" ? compare : "previous",
     csrf: session.csrf,

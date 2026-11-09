@@ -900,7 +900,7 @@ export function contextPreview(current: string, text: string): Response {
 }
 
 /**
- * The script of the proposals on the history page. It shows the Diff and Edit tabs of each proposal,
+ * The script of the proposal on the history page. It shows the Diff and Edit tabs of the proposal,
  * gets a new diff from the preview URL after the user edits the text, and changes Accept to Accept
  * with edits while the text differs from the agent's text. Without the script, the page shows the
  * diff and the text box together.
@@ -947,10 +947,10 @@ export function dashboardPage(
 ) {
   const a = esc(app);
   const mcpUrl = `${origin}/mcp`;
-  const proposals = (m: Account) => history.get(m.id)?.proposals ?? 0;
+  const hasProposal = (m: Account) => history.get(m.id)?.hasProposal ?? false;
   // Open a mailbox when it needs attention, or when it is the only one.
   const opened = (m: Account) =>
-    accounts.length === 1 || m.status !== "ok" || !m.name || !m.context || proposals(m) > 0;
+    accounts.length === 1 || m.status !== "ok" || !m.name || !m.context || hasProposal(m);
   const can = (text: string) => `<div class="r"><span>${text}</span><span class="v">${ICON.check}Allowed</span></div>`;
   /** The short text of the pill that shows that a permission is on. */
   const permissionPills: Record<keyof AccountPermissions, string> = {
@@ -984,14 +984,14 @@ export function dashboardPage(
 <span class="pills">${m.status === "ok" ? `<span class="pill ok">Linked</span>` : `<span class="pill warn">${ICON.warn}Needs re-linking</span>`}${
       calendar ? `<span class="pill ok">Calendar</span>` : `<span class="pill">No calendar</span>`
     }${onPills || `<span class="pill">Sending off</span>`}${
-      proposals(m) ? `<span class="pill warn">${proposals(m)} context ${proposals(m) === 1 ? "proposal" : "proposals"}</span>` : ""
+      hasProposal(m) ? `<span class="pill warn">Context proposal</span>` : ""
     }</span>
 <span class="chev">${ICON.chevron}</span></summary>
 <div class="body">
 ${m.status !== "ok" ? warning(`${esc(m.status_detail || "Google access stopped working.")} <a href="${relink}">Re-link</a>`) : ""}
 ${
-  proposals(m)
-    ? `<div class="notice info"><span>An agent proposed a change to the context. The context changes only when you accept it. <a href="${historyHref(m.id)}#proposals">Review the ${proposals(m) === 1 ? "proposal" : "proposals"}</a></span></div>`
+  hasProposal(m)
+    ? `<div class="notice info"><span>An agent proposed a change to the context. The context changes only when you accept it. <a href="${historyHref(m.id)}#proposal">Review the proposal</a></span></div>`
     : ""
 }
 <form method="post" action="/accounts/${id}">
@@ -1129,8 +1129,8 @@ export type ContextCompare = "text" | "previous" | "next" | "current";
 export interface ContextPageData {
   /** The accepted versions, oldest first. */
   versions: ContextVersion[];
-  /** The proposals that wait for a decision, oldest first. */
-  proposals: ContextVersion[];
+  /** The proposal that waits for a decision, or null. */
+  proposal: ContextVersion | null;
   /** The version to show. The default is the current version. */
   selectedId?: number;
   compare: ContextCompare;
@@ -1240,15 +1240,15 @@ ${
 <p class="lede">${a} instructs Claude to read the current context of <b>${esc(account.email)}</b> before it works in this mailbox. An agent can only propose a change. The context changes only when you accept the proposal. The name of the app comes from the Claude connection that you approved. The agent gives its own name, in quotes, and its reason. ${a} cannot verify them.</p></div>
 <a class="btn secondary" href="/">Back to mailboxes</a></div>
 ${
-  h.proposals.length
-    ? `<section class="sect" id="proposals"><div class="rule"><span class="n">01</span><span>Proposals</span><span class="end">${h.proposals.length} waiting</span></div>
-${h.proposals.map(proposalHtml).join("\n")}</section>`
+  h.proposal
+    ? `<section class="sect" id="proposal"><div class="rule"><span class="n">01</span><span>Proposal</span><span class="end">Waits for you</span></div>
+${proposalHtml(h.proposal)}</section>`
     : ""
 }
-<section class="sect" id="versions"><div class="rule"><span class="n">${h.proposals.length ? "02" : "01"}</span><span>Versions</span><span class="end">Newest first</span></div>
+<section class="sect" id="versions"><div class="rule"><span class="n">${h.proposal ? "02" : "01"}</span><span>Versions</span><span class="end">Newest first</span></div>
 ${versionsHtml}
 </section>
-${h.proposals.length ? `<script>${PROPOSAL_JS}</script>` : ""}`,
+${h.proposal ? `<script>${PROPOSAL_JS}</script>` : ""}`,
     { app, width: "wide", nav: [{ href: "/", text: "Mailboxes" }], aside: signedIn(who) },
   );
 }

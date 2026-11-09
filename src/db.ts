@@ -273,8 +273,6 @@ export const MAX_CONTEXT_CHARS = 8000;
 /** Returns a context with LF line breaks only. Browsers send the line breaks of a text box as CRLF. */
 const cleanContext = (text: string) => text.replace(/\r\n?/g, "\n");
 
-/** The largest number of proposals that can wait for a decision on one account. */
-export const MAX_PENDING_PROPOSALS = 10;
 
 /**
  * A version of the context notes of an account, or a change to them that an agent proposed and
@@ -304,7 +302,6 @@ export interface ContextVersion {
    * before this one, and its text was never in effect.
    */
   edited_from: number | null;
-
   created_at: number;
   /** When the change became current. Null for a proposal. */
   decided_at: number | null;
@@ -328,8 +325,8 @@ export interface ContextSummary {
   latest: ContextVersion | null;
   /** The number of accepted versions. */
   versions: number;
-  /** The number of proposals that wait for a decision. */
-  proposals: number;
+  /** True when a proposal waits for a decision. */
+  hasProposal: boolean;
 }
 
 const LATEST_ACCEPTED_ID =
@@ -381,21 +378,22 @@ export async function contextSummaries(env: Env, userId: string): Promise<Map<st
     out.set(row.account_id, {
       latest: latestByAccount.get(row.account_id) ?? null,
       versions: row.versions,
-      proposals: row.proposals,
+      hasProposal: row.proposals > 0,
     });
   }
   return out;
 }
 
 /**
- * Returns the accepted versions of the context of an account, oldest first, and the proposals that
- * wait for a decision, oldest first. Both lists are empty when the account does not belong to the user.
+ * Returns the accepted versions of the context of an account, oldest first, and the proposal that
+ * waits for a decision, or null. An account has at most one proposal. The result is empty when the
+ * account does not belong to the user.
  */
 export async function contextHistory(
   env: Env,
   userId: string,
   accountId: string,
-): Promise<{ versions: ContextVersion[]; proposals: ContextVersion[] }> {
+): Promise<{ versions: ContextVersion[]; proposal: ContextVersion | null }> {
   const { results } = await env.DB.prepare(
     `SELECT cv.* FROM context_versions cv JOIN accounts a ON a.id = cv.account_id
      WHERE a.user_id = ? AND cv.account_id = ? AND cv.status IN ('accepted', 'proposed')
@@ -405,31 +403,24 @@ export async function contextHistory(
     .all<ContextVersion>();
   return {
     versions: results.filter((v) => v.status === "accepted"),
-    proposals: results.filter((v) => v.status === "proposed"),
+    proposal: results.find((v) => v.status === "proposed") ?? null,
   };
-}
-
-/** Returns the number of proposals that wait for a decision on an account. */
-export async function pendingProposalCount(env: Env, accountId: string): Promise<number> {
-  const row = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM context_versions WHERE account_id = ? AND status = 'proposed'",
-  )
-    .bind(accountId)
-    .first<{ n: number }>();
-  return row?.n ?? 0;
 }
 
 /**
  * Saves a change to the context of an account that an agent proposes. The context does not change
- * until the user accepts the proposal. Returns the ID of the proposal.
+ * until the user accepts the proposal. An account has at most one proposal: give the ID of the
+ * proposal that waits as `replaces`, and Mailroom deletes it in the same batch. Returns the ID of the
+ * new proposal, or `conflict` when another proposal waits, for example because another agent replaced
+ * `replaces` a moment ago.
  * Precondition: `context` has at most MAX_CONTEXT_CHARS characters.
  */
 export async function proposeContext(
   env: Env,
   accountId: string,
-  change: { context: string; reason: string; agent: ContextAgent },
-): Promise<number> {
-  const result = await env.DB.prepare(
+  change: { context: string; reason: string; agent: ContextAgent; replaces?: number },
+): Promise<number | "conflict"> {
+  const insert = env.DB.prepare(
     `INSERT INTO context_versions (account_id, context, status, author_kind, author, client_id, agent_label, reason, base_id, created_at)
      VALUES (?, ?, 'proposed', 'agent', ?, ?, ?, ?, ${LATEST_ACCEPTED_ID}, ?)`,
   )
@@ -442,9 +433,24 @@ export async function proposeContext(
       change.reason,
       accountId,
       Date.now(),
-    )
-    .run();
-  return result.meta.last_row_id;
+    );
+  const remove =
+    change.replaces === undefined
+      ? []
+      : [
+          env.DB.prepare("DELETE FROM context_versions WHERE id = ? AND account_id = ? AND status = 'proposed'").bind(
+            change.replaces,
+            accountId,
+          ),
+        ];
+  try {
+    const results = await env.DB.batch([...remove, insert]);
+    return results[results.length - 1].meta.last_row_id;
+  } catch (e) {
+    // The unique index context_versions_one_proposal allows one waiting proposal for each account.
+    if (e instanceof Error && e.message.includes("UNIQUE constraint failed")) return "conflict";
+    throw e;
+  }
 }
 
 /**
