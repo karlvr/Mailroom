@@ -198,6 +198,28 @@ const isApiDisabled = (body: GoogleErrorBody) =>
   !!body.error?.details?.some((d) => d.reason === "SERVICE_DISABLED") ||
   !!body.error?.errors?.some((e) => e.reason === "accessNotConfigured");
 
+/** Sends a request with the access token of the account. When Google rejects the token once, gets a new token and tries again. */
+async function authorizedFetch(env: Env, account: Account, url: URL | string, init: RequestInit): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const token = await accessToken(env, account);
+    const res = await fetch(url, { ...init, headers: { ...(init.headers as Record<string, string>), Authorization: `Bearer ${token}` } });
+    if (res.status !== 401 || attempt > 0) return res;
+    accessTokens.delete(account.id);
+  }
+}
+
+/** Returns the error for a response from a Google API that is not OK. */
+function apiError(env: Env, api: GoogleApi, status: number, data: GoogleErrorBody): GoogleApiError {
+  if (status === 401) return new GoogleApiError(401, `${api.name} rejected the access token`);
+  if (status === 403 && isApiDisabled(data)) {
+    return new GoogleApiError(
+      403,
+      `The ${api.name} API is not enabled in the Google Cloud project of ${appName(env)}. The admin must enable it. See step 2 of the setup page.`,
+    );
+  }
+  return new GoogleApiError(status, data.error?.message ?? `${api.name} API error ${status}`);
+}
+
 async function googleApi<T>(env: Env, account: Account, api: GoogleApi, path: string, init: ApiRequest | MediaRequest): Promise<T> {
   const url = new URL(`${api.base}${path}`);
   for (const [k, v] of Object.entries(init.query ?? {})) {
@@ -210,32 +232,107 @@ async function googleApi<T>(env: Env, account: Account, api: GoogleApi, path: st
       : init.body !== undefined
         ? { type: "application/json", body: JSON.stringify(init.body) }
         : undefined;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const token = await accessToken(env, account);
-    const res = await fetch(url, {
-      method: init.method ?? "GET",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        ...(content ? { "Content-Type": content.type } : {}),
-      },
-      body: content?.body,
-    });
-    if (res.status === 401 && attempt === 0) {
-      accessTokens.delete(account.id);
-      continue;
+  const res = await authorizedFetch(env, account, url, {
+    method: init.method ?? "GET",
+    headers: content ? { "Content-Type": content.type } : {},
+    body: content?.body,
+  });
+  if (res.status === 204) return undefined as T;
+  const data = (await res.json().catch(() => ({}))) as GoogleErrorBody;
+  if (!res.ok) throw apiError(env, api, res.status, data);
+  return data as T;
+}
+
+/** One call in a Gmail batch request. `path` is relative to /gmail/v1/users/me. */
+export interface BatchCall {
+  method: string;
+  path: string;
+  body?: unknown;
+}
+
+/** The result of one call in a Gmail batch request. `error` is present when the call failed. */
+export interface BatchResult {
+  status: number;
+  body: unknown;
+  error?: string;
+}
+
+const GMAIL_BATCH_URL = "https://gmail.googleapis.com/batch/gmail/v1";
+const GMAIL_PATH_PREFIX = "/gmail/v1/users/me";
+
+/** Returns the body of a multipart/mixed batch request with one part for each call. */
+export function batchRequestBody(boundary: string, calls: BatchCall[]): string {
+  const parts = calls.map((c, i) =>
+    [
+      `--${boundary}`,
+      "Content-Type: application/http",
+      `Content-ID: <item${i}>`,
+      "",
+      `${c.method} ${GMAIL_PATH_PREFIX}${c.path} HTTP/1.1`,
+      ...(c.body !== undefined ? ["Content-Type: application/json", "", JSON.stringify(c.body)] : [""]),
+    ].join("\r\n"),
+  );
+  return `${parts.join("\r\n")}\r\n--${boundary}--\r\n`;
+}
+
+/**
+ * Parses the multipart/mixed response of a batch request. Returns the parts by the index of their
+ * call, from the Content-ID of each part. A call that has no part in the response is missing.
+ */
+export function parseBatchResponse(contentType: string, body: string): Map<number, { status: number; body: unknown }> {
+  const boundary = /boundary="?([^";]+)"?/i.exec(contentType)?.[1];
+  const out = new Map<number, { status: number; body: unknown }>();
+  if (!boundary) return out;
+  for (const part of body.split(`--${boundary}`)) {
+    const id = /^content-id:\s*<response-item(\d+)>/im.exec(part)?.[1];
+    const status = /^HTTP\/[\d.]+\s+(\d{3})/m.exec(part);
+    if (id === undefined || !status) continue;
+    const rest = part.slice(status.index);
+    const blank = /\r?\n\r?\n/.exec(rest);
+    const raw = blank ? rest.slice(blank.index + blank[0].length).trim() : "";
+    let parsed: unknown = undefined;
+    try {
+      parsed = raw ? JSON.parse(raw) : undefined;
+    } catch {
+      parsed = raw;
     }
-    if (res.status === 204) return undefined as T;
-    const data = (await res.json().catch(() => ({}))) as GoogleErrorBody;
-    if (res.status === 403 && isApiDisabled(data)) {
-      throw new GoogleApiError(
-        403,
-        `The ${api.name} API is not enabled in the Google Cloud project of ${appName(env)}. The admin must enable it. See step 2 of the setup page.`,
-      );
-    }
-    if (!res.ok) throw new GoogleApiError(res.status, data.error?.message ?? `${api.name} API error ${res.status}`);
-    return data as T;
+    out.set(Number(id), { status: Number(status[1]), body: parsed });
   }
-  throw new GoogleApiError(401, `${api.name} rejected the access token`);
+  return out;
+}
+
+/**
+ * Sends many Gmail calls for one linked account in one HTTP request, with the Gmail batch endpoint.
+ * Give at most 100 calls. Google advises at most 50, and fewer when each call uses much quota.
+ * Returns one result for each call, in the order of the calls. The function throws only when the
+ * whole batch request fails. A call that fails has a status that is not 2xx and an error.
+ */
+export async function gmailBatch(env: Env, account: Account, calls: BatchCall[]): Promise<BatchResult[]> {
+  if (!calls.length) return [];
+  const boundary = `mailroom-${randomToken(12)}`;
+  const res = await authorizedFetch(env, account, GMAIL_BATCH_URL, {
+    method: "POST",
+    headers: { "Content-Type": `multipart/mixed; boundary=${boundary}` },
+    body: batchRequestBody(boundary, calls),
+  });
+  const raw = await res.text();
+  if (!res.ok) {
+    let data: GoogleErrorBody = {};
+    try {
+      data = JSON.parse(raw) as GoogleErrorBody;
+    } catch {
+      // The body is not JSON. apiError then gives a general message.
+    }
+    throw apiError(env, GMAIL_API, res.status, data);
+  }
+  const parts = parseBatchResponse(res.headers.get("Content-Type") ?? "", raw);
+  return calls.map((_, i) => {
+    const p = parts.get(i);
+    if (!p) return { status: 0, body: undefined, error: "Gmail gave no result for this call" };
+    if (p.status >= 200 && p.status < 300) return p;
+    const message = (p.body as GoogleErrorBody | undefined)?.error?.message;
+    return { ...p, error: message ?? `Gmail API error ${p.status}` };
+  });
 }
 
 /** Call the Gmail API for one linked account. `path` is relative to /gmail/v1/users/me. */

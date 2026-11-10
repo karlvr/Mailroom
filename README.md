@@ -118,6 +118,8 @@ The agent then has these tools:
 | `get_thread` | Reads a whole thread as plain text |
 | `list_labels` | Lists the labels of one mailbox |
 | `modify_thread_labels` | Adds labels to a thread or removes labels from it. When it adds a label that does not exist, it creates that label. Removing `INBOX` archives the thread. The tool rejects `TRASH` and `SPAM`. |
+| `modify_threads_labels` | Makes the same label change to up to 500 threads in one call. You give a list of thread IDs. |
+| `modify_labels_by_query` | Makes the same label change to each thread that matches a Gmail search, up to 500 threads in one call. With `dry_run`, it changes nothing and gives the matching threads. |
 | `create_draft` | Saves a new draft or a threaded reply. It does not send the draft. |
 | `create_forward_draft` | Saves a draft that forwards one message, with its attachments. It does not send the draft. |
 | `send_draft` | Sends a draft. It works only for a mailbox where you selected **Allow sending email**. |
