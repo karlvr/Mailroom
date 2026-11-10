@@ -124,6 +124,8 @@ The agent then has these tools:
 | `create_forward_draft` | Saves a draft that forwards one message, with its attachments. It does not send the draft. |
 | `send_draft` | Sends a draft. It works only for a mailbox where you selected **Allow sending email**. |
 | `trash_thread` | Moves a thread to the trash. Gmail keeps trashed threads for 30 days. |
+| `trash_threads` | Moves up to 500 threads to the trash in one call. You give a list of thread IDs. |
+| `trash_threads_by_query` | Moves each thread that matches a Gmail search to the trash, up to 500 threads in one call. With `dry_run`, it changes nothing and gives the matching threads. |
 | `list_calendars` | Lists the calendars of one mailbox |
 | `list_events` | Lists the events of one calendar in a time range. It can also search the events. |
 | `get_event` | Reads one event, with its description as plain text and the reply of each guest |
