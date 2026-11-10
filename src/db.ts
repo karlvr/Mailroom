@@ -265,6 +265,7 @@ export async function deleteAccount(env: Env, userId: string, id: string): Promi
     await env.DB.batch([
       env.DB.prepare("DELETE FROM context_versions WHERE account_id = ?").bind(versionKey(userId, { kind: "account", accountId: id })),
       env.DB.prepare("DELETE FROM account_usage WHERE account_id = ?").bind(id),
+      env.DB.prepare("DELETE FROM bulk_confirmations WHERE account_id = ?").bind(id),
       env.DB.prepare("DELETE FROM accounts WHERE id = ? AND user_id = ?").bind(id, userId),
     ]);
   }
@@ -324,6 +325,51 @@ export async function accountUsage(env: Env, userId: string): Promise<Map<string
     .bind(start, start, userId)
     .all<{ account_id: string; last_at: number; calls: number; changes: number }>();
   return new Map(results.map((r) => [r.account_id, { lastCallAt: r.last_at, calls: r.calls, changes: r.changes }]));
+}
+
+// ---------- bulk confirmations ----------
+
+/** A preview of a bulk thread tool that waits for the agent to confirm it. */
+export interface BulkConfirmation {
+  /** The SHA-256 of the confirmation token, in base64url. */
+  tokenHash: string;
+  accountId: string;
+  /** The tool and its arguments, as JSON. */
+  action: string;
+  /** The threads that the preview showed. */
+  threadIds: string[];
+  /** The time when the preview expires, in milliseconds since the epoch. */
+  expiresAt: number;
+}
+
+/** Saves a preview, and deletes the previews that expired. */
+export async function saveBulkConfirmation(env: Env, c: BulkConfirmation): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM bulk_confirmations WHERE expires_at <= ?").bind(Date.now()),
+    env.DB.prepare(
+      "INSERT INTO bulk_confirmations (token_hash, account_id, action, thread_ids, expires_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind(c.tokenHash, c.accountId, c.action, JSON.stringify(c.threadIds), c.expiresAt),
+  ]);
+}
+
+/**
+ * Deletes the preview with the token hash, and returns its threads, when the preview is of the
+ * account and the action and did not expire. Otherwise returns null. Only one call gets the threads
+ * of a preview, so a preview works once.
+ */
+export async function takeBulkConfirmation(
+  env: Env,
+  tokenHash: string,
+  accountId: string,
+  action: string,
+): Promise<string[] | null> {
+  const row = await env.DB.prepare(
+    `DELETE FROM bulk_confirmations WHERE token_hash = ? AND account_id = ? AND action = ? AND expires_at > ?
+     RETURNING thread_ids`,
+  )
+    .bind(tokenHash, accountId, action, Date.now())
+    .first<{ thread_ids: string }>();
+  return row ? (JSON.parse(row.thread_ids) as string[]) : null;
 }
 
 // ---------- context history ----------

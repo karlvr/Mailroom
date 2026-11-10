@@ -88,6 +88,17 @@ class FakeGmail {
     return [200, { id, messages: [] }];
   }
 
+  read(id) {
+    const t = this.threads.get(id);
+    if (!t) return [404, { error: { code: 404, message: "Requested entity was not found." } }];
+    const headers = [
+      { name: "From", value: "Monitor <monitor@example.com>" },
+      { name: "Subject", value: t.subject },
+      { name: "Date", value: "Tue, 10 Nov 2026 09:00:00 +1300" },
+    ];
+    return [200, { id, messages: [{ id: `${id}-m1`, threadId: id, labelIds: [...t.labels], payload: { headers } }] }];
+  }
+
   trash(id) {
     const t = this.threads.get(id);
     if (!t) return [404, { error: { code: 404, message: "Requested entity was not found." } }];
@@ -143,7 +154,8 @@ class FakeGmail {
         const bodyAt = p.indexOf("{");
         return { id, method, path, body: bodyAt >= 0 ? JSON.parse(p.slice(bodyAt).trim()) : undefined };
       });
-    this.batches.push(calls.length);
+    const kind = calls[0].method === "GET" ? "read" : calls[0].path.endsWith("/trash") ? "trash" : "modify";
+    this.batches.push(`${kind}:${calls.length}`);
     const rejectToken = this.rejectTokenOnce || auth !== `Bearer ${this.validToken}`;
     this.rejectTokenOnce = false;
     const out = "batch_FAKE";
@@ -153,10 +165,15 @@ class FakeGmail {
       if (rejectToken) {
         [status, body] = [401, { error: { code: 401, message: "Request had invalid authentication credentials." } }];
       } else {
+        const read = /^\/gmail\/v1\/users\/me\/threads\/([^/?]+)\?format=metadata&/.exec(c.path);
         const m = /^\/gmail\/v1\/users\/me\/threads\/([^/]+)\/(modify|trash)$/.exec(c.path);
-        assert.ok(m && c.method === "POST", `unexpected batch call ${c.method} ${c.path}`);
-        const id = decodeURIComponent(m[1]);
-        [status, body] = m[2] === "trash" ? this.trash(id) : this.modify(id, c.body);
+        if (read && c.method === "GET") {
+          [status, body] = this.read(decodeURIComponent(read[1]));
+        } else {
+          assert.ok(m && c.method === "POST", `unexpected batch call ${c.method} ${c.path}`);
+          const id = decodeURIComponent(m[1]);
+          [status, body] = m[2] === "trash" ? this.trash(id) : this.modify(id, c.body);
+        }
       }
       return [
         `--${out}`,
@@ -215,17 +232,105 @@ async function call(name, args) {
   return JSON.parse(t);
 }
 
+/** Gets the preview of a bulk tool, checks that it changed nothing, and returns it. */
+async function preview(name, args) {
+  const before = JSON.stringify([...gmail.threads].map(([id, t]) => [id, [...t.labels], !!t.trashed]));
+  const labels = gmail.labels.length;
+  const p = await call(name, args);
+  assert.ok(!p.isError, p.text);
+  assert.equal(JSON.stringify([...gmail.threads].map(([id, t]) => [id, [...t.labels], !!t.trashed])), before, "a preview changes nothing");
+  assert.equal(gmail.labels.length, labels, "a preview creates no label");
+  return p;
+}
+
+/** Gets the preview of a bulk tool and confirms it. Returns the result of the confirmation. */
+async function previewAndConfirm(name, args) {
+  const p = await preview(name, args);
+  return call(name, { ...args, confirmation_token: p.confirmation_token });
+}
+
+const failures = 'subject:"PopularityService failure"';
+const kinds = (kind) => gmail.batches.filter((b) => b.startsWith(`${kind}:`)).map((b) => Number(b.split(":")[1]));
+
+describe("preview", () => {
+  test("shows the sender, subject and date of each thread, and does not count as a change", async () => {
+    const p = await preview("modify_labels_by_query", { query: failures, add: ["Ops"], remove: ["INBOX"] });
+    assert.equal(p.preview, true);
+    assert.equal(p.thread_count, 30);
+    assert.deepEqual(p.threads[0], {
+      thread_id: "t0",
+      from: "Monitor <monitor@example.com>",
+      subject: "PopularityService failure",
+      date: "Tue, 10 Nov 2026 09:00:00 +1300",
+      message_count: 1,
+    });
+    assert.ok(p.threads.every((t) => t.subject === "PopularityService failure"));
+    assert.ok(p.confirmation_token.length > 20);
+    assert.ok(Date.parse(p.expires_at) > Date.now());
+    assert.deepEqual(kinds("read"), [25, 5]);
+    assert.deepEqual(calls, [{ accountId: "acct-1", change: false }]);
+  });
+
+  test("a confirmation changes exactly the threads of the preview, also when the search matches more by then", async () => {
+    const p = await preview("modify_labels_by_query", { query: failures, add: ["Ops"] });
+    gmail.threads.set("late", { labels: new Set(["INBOX"]), subject: "PopularityService failure" });
+    const r = await call("modify_labels_by_query", { query: failures, add: ["Ops"], confirmation_token: p.confirmation_token });
+    assert.equal(r.confirmed, true);
+    assert.equal(r.changed, 30);
+    assert.ok(!gmail.threads.get("late").labels.has(gmail.labelId("Ops")));
+  });
+
+  test("a token works once", async () => {
+    const p = await preview("trash_threads", { thread_ids: ["t1"] });
+    assert.equal((await call("trash_threads", { thread_ids: ["t1"], confirmation_token: p.confirmation_token })).trashed, 1);
+    const again = await call("trash_threads", { thread_ids: ["t1"], confirmation_token: p.confirmation_token });
+    assert.match(again.text, /does not work for this call/);
+  });
+
+  test("a token does not work for other arguments or another tool", async () => {
+    const p = await preview("modify_labels_by_query", { query: failures, add: ["Ops"] });
+    const t = p.confirmation_token;
+    for (const [name, args] of [
+      ["modify_labels_by_query", { query: failures, add: ["Other"] }],
+      ["modify_labels_by_query", { query: "in:inbox", add: ["Ops"] }],
+      ["modify_labels_by_query", { query: failures, add: ["Ops"], remove: ["INBOX"] }],
+      ["trash_threads_by_query", { query: failures }],
+    ]) {
+      const r = await call(name, { ...args, confirmation_token: t });
+      assert.match(r.text, /does not work for this call/, `${name} ${JSON.stringify(args)}`);
+    }
+    assert.ok([...gmail.threads.values()].every((x) => !x.trashed && x.labels.size === 1));
+    assert.deepEqual(kinds("modify"), []);
+  });
+
+  test("an invented token changes nothing", async () => {
+    const r = await call("trash_threads_by_query", { query: failures, confirmation_token: "made-up" });
+    assert.match(r.text, /does not work for this call/);
+    assert.ok([...gmail.threads.values()].every((t) => !t.trashed));
+  });
+
+  test("a search with no matches gives no token", async () => {
+    const p = await preview("trash_threads_by_query", { query: 'subject:"nothing"' });
+    assert.deepEqual(p.threads, []);
+    assert.equal(p.confirmation_token, undefined);
+  });
+
+  test("a list with unknown threads previews only the threads that exist", async () => {
+    const p = await preview("trash_threads", { thread_ids: ["t1", "nope", "t1"] });
+    assert.deepEqual(p.threads.map((t) => t.thread_id), ["t1"]);
+    assert.deepEqual(p.not_found, ["nope"]);
+    const r = await call("trash_threads", { thread_ids: ["nope", "t1"], confirmation_token: p.confirmation_token });
+    assert.equal(r.threads, 1);
+    assert.equal(r.trashed, 1);
+  });
+});
+
 describe("modify_labels_by_query", () => {
   test("changes every matching thread, in batches of at most 25, and creates a missing label", async () => {
-    const r = await call("modify_labels_by_query", {
-      query: 'subject:"PopularityService failure"',
-      add: ["Ops/PopularityService"],
-      remove: ["INBOX"],
-    });
-    assert.equal(r.matched, 30);
+    const r = await previewAndConfirm("modify_labels_by_query", { query: failures, add: ["Ops/PopularityService"], remove: ["INBOX"] });
+    assert.equal(r.threads, 30);
     assert.equal(r.changed, 30);
     assert.deepEqual(r.failed, []);
-    assert.equal(r.more_matches, false);
     const id = gmail.labelId("Ops/PopularityService");
     assert.ok(id, "the tool created the label");
     for (const [tid, t] of gmail.threads) {
@@ -233,114 +338,90 @@ describe("modify_labels_by_query", () => {
       assert.equal(t.labels.has(id), failure, `${tid} label`);
       assert.equal(t.labels.has("INBOX"), !failure, `${tid} inbox`);
     }
-    assert.deepEqual(gmail.batches, [25, 5]);
-    assert.deepEqual(calls, [{ accountId: "acct-1", change: true }]);
+    assert.deepEqual(kinds("modify"), [25, 5]);
+    assert.deepEqual(calls, [
+      { accountId: "acct-1", change: false },
+      { accountId: "acct-1", change: true },
+    ]);
   });
 
-  test("a dry run changes nothing, creates no label and does not count as a change", async () => {
-    const r = await call("modify_labels_by_query", { query: 'subject:"PopularityService failure"', add: ["New"], dry_run: true });
-    assert.equal(r.dry_run, true);
-    assert.equal(r.matched, 30);
-    assert.equal(r.thread_ids.length, 30);
-    assert.equal(gmail.labelId("New"), undefined);
-    assert.deepEqual(gmail.batches, []);
-    assert.deepEqual(calls, [{ accountId: "acct-1", change: false }]);
-  });
-
-  test("stops at max_threads and reports more_matches", async () => {
-    const r = await call("modify_labels_by_query", { query: "in:inbox", add: ["Existing"], max_threads: 10 });
-    assert.equal(r.matched, 10);
-    assert.equal(r.changed, 10);
-    assert.equal(r.more_matches, true);
-    const labelled = [...gmail.threads.values()].filter((t) => t.labels.has("Label_1")).length;
-    assert.equal(labelled, 10);
-  });
-
-  test("follows page tokens past one page of the thread list", async () => {
+  test("previews at most 100 threads unless max_threads says otherwise, and reports more_matches", async () => {
     gmail = new FakeGmail(700);
-    const r = await call("modify_labels_by_query", { query: "in:inbox", add: ["Existing"] });
-    assert.equal(r.matched, 500);
+    const p = await preview("modify_labels_by_query", { query: "in:inbox", add: ["Existing"] });
+    assert.equal(p.thread_count, 100);
+    assert.equal(p.more_matches, true);
+    const big = await preview("modify_labels_by_query", { query: "in:inbox", add: ["Existing"], max_threads: 500 });
+    assert.equal(big.thread_count, 500);
+    const r = await call("modify_labels_by_query", { query: "in:inbox", add: ["Existing"], confirmation_token: big.confirmation_token });
     assert.equal(r.changed, 500);
-    assert.equal(r.more_matches, true);
-    assert.equal(gmail.batches.length, 20);
+    assert.equal(kinds("modify").length, 20);
   });
 
-  test("a search with no matches changes nothing", async () => {
-    const r = await call("modify_labels_by_query", { query: 'subject:"nothing"', add: ["New"] });
-    assert.equal(r.matched, 0);
-    assert.equal(r.changed, 0);
-    assert.equal(gmail.labelId("New"), undefined);
-    assert.deepEqual(calls, [{ accountId: "acct-1", change: false }]);
-  });
-
-  test("rejects an empty search, forbidden labels and an empty change", async () => {
+  test("rejects an empty search, forbidden labels and an empty change, before it reads mail", async () => {
     assert.ok((await call("modify_labels_by_query", { query: "  ", add: ["X"] })).isError);
-    const trash = await call("modify_labels_by_query", { query: "in:inbox", add: ["Trash"], dry_run: true });
-    assert.match(trash.text, /cannot add or remove these labels: Trash/);
+    assert.match((await call("modify_labels_by_query", { query: "in:inbox", add: ["Trash"] })).text, /cannot add or remove these labels: Trash/);
     assert.match((await call("modify_labels_by_query", { query: "in:inbox" })).text, /at least one label/);
     assert.deepEqual(gmail.batches, []);
   });
 });
 
 describe("modify_threads_labels", () => {
-  test("changes each thread, tries rate-limited threads again and reports unknown threads", async () => {
+  test("changes each thread, and tries rate-limited threads again", async () => {
+    const p = await preview("modify_threads_labels", { thread_ids: ["t1", "t3", "t7"], add: ["STARRED"], remove: ["INBOX"] });
     gmail.rateLimitOnce = new Set(["t3", "t7"]);
-    const r = await call("modify_threads_labels", { thread_ids: ["t1", "t3", "t7", "t3", "nope"], add: ["STARRED"], remove: ["INBOX"] });
-    assert.equal(r.threads, 4);
+    const r = await call("modify_threads_labels", {
+      thread_ids: ["t7", "t3", "t1"],
+      add: ["STARRED"],
+      remove: ["INBOX"],
+      confirmation_token: p.confirmation_token,
+    });
     assert.equal(r.changed, 3);
-    assert.deepEqual(r.failed, [{ thread_id: "nope", error: "Requested entity was not found." }]);
+    assert.deepEqual(r.failed, []);
     for (const id of ["t1", "t3", "t7"]) {
       assert.ok(gmail.threads.get(id).labels.has("STARRED"));
       assert.ok(!gmail.threads.get(id).labels.has("INBOX"));
     }
-    assert.deepEqual(gmail.batches, [4, 2]);
+    assert.deepEqual(kinds("modify"), [3, 2]);
+  });
+
+  test("a token does not work for another list of threads", async () => {
+    const p = await preview("modify_threads_labels", { thread_ids: ["t1"], add: ["Existing"] });
+    const r = await call("modify_threads_labels", { thread_ids: ["t1", "t2"], add: ["Existing"], confirmation_token: p.confirmation_token });
+    assert.match(r.text, /does not work for this call/);
   });
 
   test("gets a new token when Gmail rejects the token inside a batch", async () => {
-    await call("modify_threads_labels", { thread_ids: ["t1"], add: ["Existing"] });
+    const p = await preview("modify_threads_labels", { thread_ids: ["t2", "t4"], add: ["Existing"] });
     const before = gmail.tokenRequests;
     gmail.rejectTokenOnce = true;
-    const r = await call("modify_threads_labels", { thread_ids: ["t2", "t4"], add: ["Existing"] });
+    const r = await call("modify_threads_labels", { thread_ids: ["t2", "t4"], add: ["Existing"], confirmation_token: p.confirmation_token });
     assert.equal(r.changed, 2);
     assert.deepEqual(r.failed, []);
     assert.equal(gmail.tokenRequests, before + 1);
   });
 
   test("reports a label to remove that does not exist", async () => {
-    const r = await call("modify_threads_labels", { thread_ids: ["t1"], remove: ["Missing"] });
+    const r = await previewAndConfirm("modify_threads_labels", { thread_ids: ["t1"], remove: ["Missing"] });
     assert.deepEqual(r.labels_not_found, ["Missing"]);
   });
 });
 
 describe("trash_threads_by_query", () => {
-  test("trashes every matching thread, and a second call finds none", async () => {
-    const r = await call("trash_threads_by_query", { query: 'subject:"PopularityService failure"' });
-    assert.equal(r.matched, 30);
+  test("trashes every matching thread, and then the search matches none", async () => {
+    const r = await previewAndConfirm("trash_threads_by_query", { query: failures });
     assert.equal(r.trashed, 30);
     assert.deepEqual(r.failed, []);
     for (const t of gmail.threads.values()) assert.equal(!!t.trashed, t.subject === "PopularityService failure");
-    assert.deepEqual(gmail.batches, [25, 5]);
-    assert.deepEqual(calls, [{ accountId: "acct-1", change: true }]);
-    const again = await call("trash_threads_by_query", { query: 'subject:"PopularityService failure"' });
-    assert.equal(again.matched, 0);
+    assert.deepEqual(kinds("trash"), [25, 5]);
+    const again = await preview("trash_threads_by_query", { query: failures });
+    assert.deepEqual(again.threads, []);
   });
 
-  test("a dry run trashes nothing and does not count as a change", async () => {
-    const r = await call("trash_threads_by_query", { query: "in:inbox", dry_run: true, max_threads: 50 });
-    assert.equal(r.matched, 50);
-    assert.equal(r.more_matches, true);
-    assert.equal(r.thread_ids.length, 50);
-    assert.ok([...gmail.threads.values()].every((t) => !t.trashed));
-    assert.deepEqual(calls, [{ accountId: "acct-1", change: false }]);
-  });
-
-  test("continues where the previous call stopped", async () => {
-    const first = await call("trash_threads_by_query", { query: "in:inbox", max_threads: 40 });
+  test("continues where the previous confirmation stopped", async () => {
+    const first = await previewAndConfirm("trash_threads_by_query", { query: "in:inbox", max_threads: 40 });
     assert.equal(first.trashed, 40);
-    assert.equal(first.more_matches, true);
-    const second = await call("trash_threads_by_query", { query: "in:inbox", max_threads: 40 });
+    const second = await previewAndConfirm("trash_threads_by_query", { query: "in:inbox", max_threads: 40 });
     assert.equal(second.trashed, 20);
-    assert.equal(second.more_matches, false);
     assert.ok([...gmail.threads.values()].every((t) => t.trashed));
   });
 
@@ -350,12 +431,11 @@ describe("trash_threads_by_query", () => {
 });
 
 describe("trash_threads", () => {
-  test("trashes each thread, tries rate-limited threads again and reports unknown threads", async () => {
+  test("trashes each thread and tries rate-limited threads again", async () => {
+    const p = await preview("trash_threads", { thread_ids: ["t1", "t2"] });
     gmail.rateLimitOnce = new Set(["t2"]);
-    const r = await call("trash_threads", { thread_ids: ["t1", "t2", "nope"] });
-    assert.equal(r.threads, 3);
+    const r = await call("trash_threads", { thread_ids: ["t1", "t2"], confirmation_token: p.confirmation_token });
     assert.equal(r.trashed, 2);
-    assert.deepEqual(r.failed, [{ thread_id: "nope", error: "Requested entity was not found." }]);
     assert.ok(gmail.threads.get("t1").trashed && gmail.threads.get("t2").trashed);
     assert.ok(!gmail.threads.get("t3").trashed);
   });

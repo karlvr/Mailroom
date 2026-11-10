@@ -17,7 +17,7 @@ export const RELEASE_NOTES: ReleaseDay[] = [
   {
     date: "2026-11-10",
     changes: [
-      "An agent can label, archive or trash many threads in one call: give a list of threads, or a Gmail search such as all the failure reports from one service.",
+      "An agent can label, archive or trash many threads at once: give a list of threads, or a Gmail search such as all the failure reports from one service. The agent first gets a preview with the subject of each thread, and the change happens only when it confirms that preview.",
       "The Mailboxes page shows when an agent last used each mailbox, and how many calls and changes agents made in the last 7 days.",
       "You can connect Claude Code, Codex and ChatGPT, as well as Claude. The Connect an agent page has the steps.",
       "The Mailboxes page shows each mailbox that still needs a name and context notes.",
