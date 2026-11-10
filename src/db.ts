@@ -125,6 +125,8 @@ export interface Account {
   status_detail: string | null;
   /** 1 when the owner allows agents to send email from this mailbox, otherwise 0. */
   allow_send: number;
+  /** 1 when the owner allows agents to send replies to the people of the message that each reply answers, otherwise 0. */
+  allow_reply_email: number;
   /** 1 when the owner allows agents to send calendar invitations from this account, otherwise 0. */
   allow_invite: number;
   /** 1 when the owner allows agents to reply to calendar invitations for this account, otherwise 0. */
@@ -142,6 +144,11 @@ export interface Account {
 export interface AccountPermissions {
   /** True when agents may send email from this mailbox. */
   sendEmail: boolean;
+  /**
+   * True when agents may send a reply to the people of the message that it answers: its sender, and
+   * its To, Cc and Reply-To addresses. sendEmail allows every message, so it includes this permission.
+   */
+  replyEmail: boolean;
   /** True when agents may invite guests to events, and change or delete events that have other guests. */
   sendInvitations: boolean;
   /** True when agents may accept, decline or tentatively accept invitations. */
@@ -151,13 +158,19 @@ export interface AccountPermissions {
 /** The label of the setting that controls each permission, as the owner sees it on the web page. */
 export const PERMISSION_LABELS: Record<keyof AccountPermissions, string> = {
   sendEmail: "Allow sending email",
+  replyEmail: "Allow replies",
   sendInvitations: "Allow sending calendar invitations",
   rsvp: "Allow RSVPs",
 };
 
 /** Returns the permissions that the owner gave to an account. */
 export function accountPermissions(a: Account): AccountPermissions {
-  return { sendEmail: a.allow_send === 1, sendInvitations: a.allow_invite === 1, rsvp: a.allow_reply === 1 };
+  return {
+    sendEmail: a.allow_send === 1,
+    replyEmail: a.allow_reply_email === 1,
+    sendInvitations: a.allow_invite === 1,
+    rsvp: a.allow_reply === 1,
+  };
 }
 
 /** Returns the Google permissions that the stored refresh token of the account grants. */
@@ -183,7 +196,7 @@ export interface LinkedGoogleAccount {
 }
 
 const ACCOUNT_COLS =
-  "id, user_id, email, name, context, status, status_detail, allow_send, allow_invite, allow_reply, scopes, created_at, updated_at";
+  "id, user_id, email, name, context, status, status_detail, allow_send, allow_reply_email, allow_invite, allow_reply, scopes, created_at, updated_at";
 
 export async function listAccounts(env: Env, userId: string): Promise<Account[]> {
   const { results } = await env.DB.prepare(
@@ -244,9 +257,18 @@ export async function updateAccountDetails(
   const p = details.permissions;
   const now = Date.now();
   const update = env.DB.prepare(
-    `UPDATE accounts SET name = ?, allow_send = ?, allow_invite = ?, allow_reply = ?, updated_at = ?
+    `UPDATE accounts SET name = ?, allow_send = ?, allow_reply_email = ?, allow_invite = ?, allow_reply = ?, updated_at = ?
      WHERE id = ? AND user_id = ?`,
-  ).bind(details.name.slice(0, 100), p.sendEmail ? 1 : 0, p.sendInvitations ? 1 : 0, p.rsvp ? 1 : 0, now, id, userId);
+  ).bind(
+    details.name.slice(0, 100),
+    p.sendEmail ? 1 : 0,
+    p.replyEmail ? 1 : 0,
+    p.sendInvitations ? 1 : 0,
+    p.rsvp ? 1 : 0,
+    now,
+    id,
+    userId,
+  );
   const change = await userChange(env, userId, { kind: "account", accountId: id }, details.context, editor, now);
   await env.DB.batch([update, ...change]);
 }

@@ -780,7 +780,7 @@ export function privacyPage(app: string, origin: string) {
 ${section(
   `Data that ${a} stores`,
   `<ul><li>Your Google account ID, your email address, your global context, and the times of your first and last sign-in.</li>
-<li>For each mailbox that you link: its address, its short name, its context notes, the settings <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.rsvp)}</b>, the Google permissions that you granted, and a Google refresh token. ${a} encrypts the token before it stores it.</li>
+<li>For each mailbox that you link: its address, its short name, its context notes, the settings <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, <b>${esc(PERMISSION_LABELS.replyEmail)}</b>, <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.rsvp)}</b>, the Google permissions that you granted, and a Google refresh token. ${a} encrypts the token before it stores it.</li>
 <li>For your global context and for each mailbox: each version of the context notes that you saved or accepted, when the version became current, and who made it. For a change that an agent proposed, ${a} also stores the name of the app, and the name and the reason that the agent gave. ${a} deletes a proposal when you reject it.</li>
 <li>For each mailbox: the number of tool calls that agents made on each day, the number of those calls that made changes, and the time of the last call. When an agent uses the mailbox, ${a} deletes the counts that are older than ${USAGE_DAYS} days.</li>
 <li>Your web session, a record of each agent connection that you approve, and the version of the tool list that each connection loaded last.</li></ul>
@@ -789,7 +789,7 @@ ${section(
 ${section(
   `How ${a} uses your Google data`,
   `<p>${a} uses Google sign-in to get your verified email address. ${a} uses the Gmail API and the Google Calendar API only when an agent calls one of the ${a} tools. ${a} then sends the result to that agent through the connection that you approved.</p>
-<p>The tools can search, read, label and trash email, and save drafts of new messages, replies and forwards. ${a} sends email only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendEmail)}</b>.</p>
+<p>The tools can search, read, label and trash email, and save drafts of new messages, replies and forwards. ${a} sends email only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, or where you select <b>${esc(PERMISSION_LABELS.replyEmail)}</b> and the email is a reply to the people of the message that it answers.</p>
 <p>The tools can read calendars, find free time, and create, change and delete events. ${a} sends calendar invitations only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b>. ${a} RSVPs to invitations only for a mailbox where you select <b>${esc(PERMISSION_LABELS.rsvp)}</b>.</p>
 <p>${a} does not sell your data. ${a} does not use your data for advertising or to train AI models.</p>
 <p>The use and transfer of information that ${a} receives from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>`,
@@ -833,7 +833,7 @@ ${section(
 )}
 ${section(
   "Your instructions",
-  `<p>An agent uses ${a} when you instruct it. You are responsible for your instructions and for the actions that an agent does because of them. Select <b>${esc(PERMISSION_LABELS.sendEmail)}</b> only for a mailbox where you accept that an agent can send email. Select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.rsvp)}</b> only for a mailbox where you accept that an agent can send calendar invitations and RSVPs.</p>
+  `<p>An agent uses ${a} when you instruct it. You are responsible for your instructions and for the actions that an agent does because of them. Select <b>${esc(PERMISSION_LABELS.sendEmail)}</b> only for a mailbox where you accept that an agent can send email, and <b>${esc(PERMISSION_LABELS.replyEmail)}</b> only for a mailbox where you accept that an agent can reply to email. Select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.rsvp)}</b> only for a mailbox where you accept that an agent can send calendar invitations and RSVPs.</p>
 <p>${a} instructs agents to treat email and calendar content as data, never as instructions. This instruction reduces the risk that an email or an event tricks an agent, but it cannot remove the risk.</p>`,
 )}
 ${section(
@@ -907,6 +907,7 @@ ${RELEASE_NOTES.map((d) =>
 /** The name of the check box for each permission in the form of a mailbox. The form sends the value "1" when the box is selected. */
 export const PERMISSION_FIELDS: Record<keyof AccountPermissions, string> = {
   sendEmail: "allow_send",
+  replyEmail: "allow_reply_email",
   sendInvitations: "allow_invite",
   rsvp: "allow_reply",
 };
@@ -1098,11 +1099,13 @@ export function dashboardPage(
   /** The short text of the pill that shows that a permission is on. */
   const permissionPills: Record<keyof AccountPermissions, string> = {
     sendEmail: "Sending on",
+    replyEmail: "Replies on",
     sendInvitations: "Invitations on",
     rsvp: "RSVP on",
   };
   const permissionHelp: Record<keyof AccountPermissions, string> = {
-    sendEmail: "Agents can send email from this mailbox.",
+    sendEmail: "Agents can send email from this mailbox: new messages, forwards and replies to anyone.",
+    replyEmail: `Agents can reply, or reply to all, to a message. Each person who gets the reply must be on that message already. To send a new message or a forward, or to add people to a reply, agents need ${esc(PERMISSION_LABELS.sendEmail)}. ${esc(PERMISSION_LABELS.sendEmail)} includes replies, so you do not need to select both.`,
     sendInvitations: "Agents can invite guests to events, and change or delete events that have other guests. Google emails each guest.",
     rsvp: "Agents can accept, decline or tentatively accept invitations. Google tells the organizer.",
   };
@@ -1115,7 +1118,8 @@ export function dashboardPage(
     // After a link, the cursor goes to the first empty field of the new mailbox.
     const focus = m.id === notices.linkedMailbox ? (m.name ? "context" : "name") : null;
     const onPills = permissionKeys
-      .filter((k) => permissions[k])
+      // Sending includes replies, so "Replies on" shows only when sending is off.
+      .filter((k) => permissions[k] && !(k === "replyEmail" && permissions.sendEmail))
       .map((k) => `<span class="pill send">${ICON.send}${permissionPills[k]}</span>`)
       .join("");
     const toggle = (k: keyof AccountPermissions) => {
@@ -1343,6 +1347,7 @@ export function consentPage(
     const p = accountPermissions(m);
     return [
       p.sendEmail ? `<span class="pill ok">Can send</span>` : "",
+      !p.sendEmail && p.replyEmail ? `<span class="pill ok">Can reply</span>` : "",
       p.sendInvitations ? `<span class="pill ok">Can invite</span>` : "",
       p.rsvp ? `<span class="pill ok">Can RSVP</span>` : "",
     ].join("");

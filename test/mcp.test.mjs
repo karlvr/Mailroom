@@ -1,4 +1,4 @@
-// Tests of the bulk thread tools: labels and trash. The test bundles the real src/mcp.ts with esbuild, replaces the D1
+// Tests of the MCP tools: the bulk thread tools and send_draft. The test bundles the real src/mcp.ts with esbuild, replaces the D1
 // parts of src/db.ts with test/support/db-stub.ts, and answers the Google requests with a fake Gmail.
 import { after, before, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
@@ -20,6 +20,8 @@ before(async () => {
       contents: `
         export { buildServer } from ${JSON.stringify(join(root, "src/mcp.ts"))};
         export { parseBatchResponse, batchRequestBody } from ${JSON.stringify(join(root, "src/google.ts"))};
+        export { TEST_ACCOUNT } from ${JSON.stringify(join(root, "test/support/db-stub.ts"))};
+        export { addressList } from ${JSON.stringify(join(root, "src/mime.ts"))};
         export { Client } from "@modelcontextprotocol/sdk/client/index.js";
         export { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
       `,
@@ -64,6 +66,12 @@ class FakeGmail {
       this.threads.set(`t${i}`, { labels: new Set(["INBOX"]), subject: i % 2 === 0 ? "PopularityService failure" : "Lunch" });
     }
     this.batches = [];
+    /** Drafts by ID: the thread and the headers of each. */
+    this.drafts = new Map();
+    /** Threads for send_draft, by ID: the labels and headers of each message. */
+    this.mailThreads = new Map();
+    /** The IDs of the drafts that Gmail sent. */
+    this.sent = [];
     this.tokenRequests = 0;
     this.tokens = 0;
     this.validToken = null;
@@ -133,6 +141,25 @@ class FakeGmail {
       const page = all.slice(start, start + size);
       const next = start + size < all.length ? String(start + size) : undefined;
       return Response.json({ threads: page.map((id) => ({ id })), ...(next ? { nextPageToken: next } : {}) });
+    }
+    const draft = /^\/drafts\/([^/]+)$/.exec(path);
+    if (draft && method === "GET") {
+      const d = this.drafts.get(decodeURIComponent(draft[1]));
+      if (!d) return Response.json({ error: { code: 404, message: "Requested entity was not found." } }, { status: 404 });
+      return Response.json({ id: draft[1], message: { id: `${draft[1]}-m`, threadId: d.threadId, labelIds: ["DRAFT"], payload: { headers: d.headers } } });
+    }
+    if (path === "/drafts/send" && method === "POST") {
+      const { id } = JSON.parse(init.body);
+      this.sent.push(id);
+      return Response.json({ id: `${id}-sent`, threadId: this.drafts.get(id).threadId });
+    }
+    const thread = /^\/threads\/([^/]+)$/.exec(path);
+    if (thread && method === "GET") {
+      const t = this.mailThreads.get(decodeURIComponent(thread[1]));
+      return Response.json({
+        id: thread[1],
+        messages: t.map((msg, i) => ({ id: `${thread[1]}-${i}`, threadId: thread[1], labelIds: msg.labels, payload: { headers: msg.headers } })),
+      });
     }
     const m = /^\/threads\/([^/]+)\/modify$/.exec(path);
     if (m && method === "POST") {
@@ -447,6 +474,118 @@ describe("modify_thread_labels", () => {
     assert.equal(r.thread_id, "t5");
     assert.deepEqual([...gmail.threads.get("t5").labels], ["Label_1"]);
     assert.deepEqual(gmail.batches, []);
+  });
+});
+
+/** Returns Gmail headers from an object of names and values. */
+const headers = (o) => Object.entries(o).map(([name, value]) => ({ name, value }));
+
+describe("send_draft", () => {
+  /** Sets the two send permissions of the test mailbox. */
+  const allow = (send, reply) => {
+    mod.TEST_ACCOUNT.allow_send = send ? 1 : 0;
+    mod.TEST_ACCOUNT.allow_reply_email = reply ? 1 : 0;
+  };
+
+  beforeEach(() => {
+    allow(false, true);
+    gmail.mailThreads.set("r1", [
+      {
+        labels: ["INBOX"],
+        headers: headers({
+          "Message-ID": "<orig@example.com>",
+          From: '"Smith, Ana" <Ana@Example.com>',
+          To: "me@example.com, Bob <bob@example.com>",
+          Cc: "carol@example.com",
+          "Reply-To": "team@example.com",
+        }),
+      },
+      { labels: ["DRAFT"], headers: headers({ "Message-ID": "<draft@example.com>", From: "me@example.com", To: "eve@evil.example" }) },
+    ]);
+  });
+
+  /** Saves a draft in thread r1 with the headers, and returns the result of send_draft for it. */
+  const send = async (h) => {
+    const id = `d${gmail.drafts.size + 1}`;
+    gmail.drafts.set(id, { threadId: "r1", headers: headers(h) });
+    return call("send_draft", { draft_id: id });
+  };
+
+  test("sends a reply to the sender", async () => {
+    const r = await send({ To: '"Smith, Ana" <ana@example.com>', "In-Reply-To": "<orig@example.com>" });
+    assert.ok(!r.isError, r.text);
+    assert.deepEqual(gmail.sent, ["d1"]);
+  });
+
+  test("sends a reply to all, and to the Reply-To address", async () => {
+    const r = await send({
+      To: "team@example.com, ANA@example.com",
+      Cc: "Bob <bob@example.com>, carol@example.com, me@example.com",
+      "In-Reply-To": "<orig@example.com>",
+    });
+    assert.ok(!r.isError, r.text);
+    assert.equal(gmail.sent.length, 1);
+  });
+
+  test("refuses a reply that adds a person, also in Bcc", async () => {
+    for (const h of [
+      { To: "ana@example.com, dan@example.com" },
+      { To: "ana@example.com", Cc: "dan@example.com" },
+      { To: "ana@example.com", Bcc: "dan@example.com" },
+    ]) {
+      const r = await send({ ...h, "In-Reply-To": "<orig@example.com>" });
+      assert.match(r.text, /not on the message that the draft answers: dan@example.com/);
+    }
+    assert.deepEqual(gmail.sent, []);
+  });
+
+  test("refuses a new message, and a reply to a draft", async () => {
+    assert.match((await send({ To: "ana@example.com" })).text, /not a reply\./);
+    assert.match((await send({ To: "eve@evil.example", "In-Reply-To": "<draft@example.com>" })).text, /not a reply to a message in its thread/);
+    assert.match((await send({ To: "ana@example.com", "In-Reply-To": "<other@example.com>" })).text, /not a reply to a message in its thread/);
+    assert.deepEqual(gmail.sent, []);
+  });
+
+  test("an address in a display name does not count", async () => {
+    gmail.mailThreads.get("r1")[0].headers = headers({ "Message-ID": "<orig@example.com>", From: '"eve@evil.example" <ana@example.com>' });
+    const r = await send({ To: "eve@evil.example", "In-Reply-To": "<orig@example.com>" });
+    assert.match(r.text, /eve@evil.example/);
+    assert.deepEqual(gmail.sent, []);
+  });
+
+  test("without either setting, sends nothing", async () => {
+    allow(false, false);
+    const r = await send({ To: "ana@example.com", "In-Reply-To": "<orig@example.com>" });
+    assert.match(r.text, /did not select "Allow sending email"/);
+    assert.deepEqual(gmail.sent, []);
+  });
+
+  test("with Allow sending email, sends any draft", async () => {
+    allow(true, false);
+    assert.ok(!(await send({ To: "dan@example.com" })).isError);
+    assert.equal(gmail.sent.length, 1);
+  });
+
+  test("list_accounts gives can_reply", async () => {
+    const accounts = async () => (await client.callTool({ name: "list_accounts", arguments: {} })).content[0].text;
+    assert.match(await accounts(), /"can_send": false,\s*"can_reply": true/);
+    allow(true, false);
+    assert.match(await accounts(), /"can_send": true,\s*"can_reply": true/);
+    allow(false, false);
+    assert.match(await accounts(), /"can_send": false,\s*"can_reply": false/);
+  });
+});
+
+describe("addressList", () => {
+  test("reads addresses with and without names", () => {
+    assert.deepEqual(mod.addressList('"Smith, Ana" <Ana@Example.com>, bob@example.com; Carol (work) <carol@example.com>'), [
+      "ana@example.com",
+      "bob@example.com",
+      "carol@example.com",
+    ]);
+    assert.deepEqual(mod.addressList('"x@y.com" <z@example.com>'), ["z@example.com"]);
+    assert.deepEqual(mod.addressList(undefined), []);
+    assert.deepEqual(mod.addressList("undisclosed-recipients:;"), []);
   });
 });
 

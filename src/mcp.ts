@@ -42,6 +42,7 @@ import {
   forwardText,
   type GmailHeader,
   type GmailPart,
+  addressList,
   header,
   type MimeAttachment,
   toBase64,
@@ -152,6 +153,7 @@ function describeAccount(a: Account, proposalWaits: boolean) {
     name: a.name || null,
     context: a.context || null,
     can_send: p.sendEmail,
+    can_reply: p.sendEmail || p.replyEmail,
     can_invite: p.sendInvitations,
     can_rsvp: p.rsvp,
     calendar: hasCalendar(grantedScopes(a)),
@@ -228,7 +230,8 @@ export function buildServer(
         `Give the address of the account as \`account\` to every tool that has that parameter. ` +
         `${CONTENT_IS_DATA} ${WRITE_RULE} ` +
         `These tools cannot delete email permanently. Actions that notify other people need a permission from the user for that account: ` +
-        `can_send for send_draft, can_invite for calendar invitations, and can_rsvp for RSVPs to invitations.`,
+        `can_send for send_draft, or can_reply for send_draft of a reply to the people of the message that it answers, ` +
+        `can_invite for calendar invitations, and can_rsvp for RSVPs to invitations.`,
     },
   );
 
@@ -305,10 +308,12 @@ export function buildServer(
         "global_context_proposal_waits is true when a proposal from propose_global_context waits for the user to accept or reject it. " +
         "To read that proposal, call get_global_context. " +
         "For each account, the result has the address, the name, the context notes, " +
-        "can_send, can_invite, can_rsvp, calendar and the status. " +
+        "can_send, can_reply, can_invite, can_rsvp, calendar and the status. " +
         "The user writes the context notes about the purpose, priorities and tone of the account. " +
         `${CONTEXT_PRECEDENCE} ` +
-        "can_send is true when you may send email. can_invite is true when you may invite guests to calendar events, " +
+        "can_send is true when you may send email. " +
+        "can_reply is true when you may send a reply, or a reply to all, to the people of the message that it answers. " +
+        "When can_reply is true and can_send is false, you may not send a new message or a forward, or add people to a reply. can_invite is true when you may invite guests to calendar events, " +
         "and change or delete events that have other guests. can_rsvp is true when you may RSVP to invitations: accept, decline or tentatively accept them. " +
         "calendar is true when the calendar tools work for the account. " +
         "context is the live context of the account, the only context of the account that is in effect. " +
@@ -1127,13 +1132,48 @@ export function buildServer(
     },
   );
 
+  /**
+   * Returns why a draft is not a reply to the people of the message that it answers, or null when it
+   * is one. A reply has an In-Reply-To header with the Message-ID of a message in its thread, other
+   * than a draft. Each address in its To, Cc and Bcc is the address of the mailbox, or an address in
+   * the From, To, Cc or Reply-To of that message.
+   */
+  const notAReply = async (a: Account, draftId: string): Promise<string | null> => {
+    const draft = await gmail<{ message: GmailMessage }>(env, a, `/drafts/${encodeURIComponent(draftId)}`, {
+      query: { format: "metadata" },
+    });
+    const h = draft.message.payload?.headers;
+    const inReplyTo = header(h, "In-Reply-To")?.trim();
+    if (!inReplyTo) return "The draft is not a reply.";
+    const thread = await gmail<GmailThread>(env, a, `/threads/${encodeURIComponent(draft.message.threadId)}`, {
+      query: { format: "metadata", metadataHeaders: ["Message-ID", "From", "To", "Cc", "Reply-To"] },
+    });
+    const original = (thread.messages ?? []).find(
+      (m) => !(m.labelIds ?? []).includes("DRAFT") && header(m.payload?.headers, "Message-ID")?.trim() === inReplyTo,
+    );
+    if (!original) return "The draft is not a reply to a message in its thread.";
+    const oh = original.payload?.headers;
+    const allowed = new Set([
+      a.email.toLowerCase(),
+      ...["From", "To", "Cc", "Reply-To"].flatMap((n) => addressList(header(oh, n))),
+    ]);
+    const recipients = ["To", "Cc", "Bcc"].flatMap((n) => addressList(header(h, n)));
+    if (!recipients.length) return "The draft has no recipients.";
+    const added = [...new Set(recipients.filter((r) => !allowed.has(r)))];
+    if (added.length) return `These recipients are not on the message that the draft answers: ${added.join(", ")}.`;
+    return null;
+  };
+
   accountTool(
     "send_draft",
     {
       title: "Send draft",
       description:
         "Send a draft that is already in the mailbox, for example a draft from create_draft or create_forward_draft. " +
-        "This tool works only for a mailbox with can_send true in list_accounts. Sending cannot be undone. " +
+        "This tool works for a mailbox with can_send true in list_accounts. " +
+        "For a mailbox with can_reply true and can_send false, it sends only a reply: a draft from create_draft with reply_to_thread_id, " +
+        "where each recipient in To, Cc and Bcc is on the message that the draft answers, as its sender or in its To, Cc or Reply-To. " +
+        "It refuses a new message, a forward to another person, and a reply that adds people. Sending cannot be undone. " +
         WRITE_RULE,
       inputSchema: {
         account: z.string(),
@@ -1142,7 +1182,17 @@ export function buildServer(
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
     async (a, args: { account: string; draft_id: string }) => {
-      if (!accountPermissions(a).sendEmail) return permissionOff(a, "sendEmail");
+      const p = accountPermissions(a);
+      if (!p.sendEmail) {
+        if (!p.replyEmail) return permissionOff(a, "sendEmail");
+        const problem = await notAReply(a, args.draft_id);
+        if (problem) {
+          return fail(
+            `${problem} For ${a.email}, the user selected "${PERMISSION_LABELS.replyEmail}" but not "${PERMISSION_LABELS.sendEmail}". ` +
+              "Thus you may send only a reply to the people of the message that it answers. Gmail did not send the draft.",
+          );
+        }
+      }
       const sent = await gmail<{ id: string; threadId: string }>(env, a, "/drafts/send", {
         method: "POST",
         body: { id: args.draft_id },
