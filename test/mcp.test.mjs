@@ -56,6 +56,9 @@ after(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+/** The date of a message in the fake Gmail without a date of its own. */
+const DEFAULT_DATE = "Tue, 10 Nov 2026 09:00:00 +1300";
+
 /** A fake Gmail with labels and threads. It records the requests it gets. */
 class FakeGmail {
   constructor(threadCount) {
@@ -69,6 +72,8 @@ class FakeGmail {
       this.threads.set(`t${i}`, { labels: new Set(["INBOX"]), subject: i % 2 === 0 ? "PopularityService failure" : "Lunch" });
     }
     this.batches = [];
+    /** The query of each search, as threads.list gets it. */
+    this.searches = [];
     /** Drafts by ID: the thread and the headers of each. */
     this.drafts = new Map();
     /** Threads for send_draft, by ID: the labels and headers of each message. */
@@ -103,6 +108,11 @@ class FakeGmail {
   }
 
   matches(q) {
+    const newer = /^newer_than:(\d+)d$/.exec(q);
+    if (newer) {
+      const limit = Date.now() - Number(newer[1]) * 86_400_000;
+      return [...this.threads].filter(([, t]) => !t.trashed && Date.parse(t.date ?? DEFAULT_DATE) > limit).map(([id]) => id);
+    }
     const unread = /^\((.*)\) is:unread$/.exec(q);
     if (unread) return this.matches(unread[1]).filter((id) => this.threads.get(id).labels.has("UNREAD"));
     const m = /^subject:"(.+)"$/.exec(q);
@@ -134,7 +144,7 @@ class FakeGmail {
     const headers = [
       { name: "From", value: t.from ?? "Monitor <monitor@example.com>" },
       { name: "Subject", value: t.subject },
-      { name: "Date", value: t.date ?? "Tue, 10 Nov 2026 09:00:00 +1300" },
+      { name: "Date", value: t.date ?? DEFAULT_DATE },
       ...(t.list ? [{ name: "List-Id", value: t.list }] : []),
     ];
     const messages = this.messagesOf(id).map((m) => ({
@@ -189,6 +199,7 @@ class FakeGmail {
       return Response.json(label);
     }
     if (path === "/threads" && method === "GET") {
+      this.searches.push(url.searchParams.get("q"));
       const all = this.matches(url.searchParams.get("q"));
       const start = Number(url.searchParams.get("pageToken") ?? 0);
       const size = Number(url.searchParams.get("maxResults") ?? 100);
@@ -661,6 +672,32 @@ describe("safeguards", () => {
       ids: ["seen", "sent", "starred"],
       left_out: { newer: 1, unread: 1 },
     });
+  });
+
+  test("older_than_days leaves out threads with a newer message without reading them, and goes on to later results", async () => {
+    gmail = new FakeGmail(0);
+    // Gmail lists the threads with the newest messages first.
+    for (let i = 0; i < 600; i++) gmail.threads.set(`r${i}`, { labels: new Set(["INBOX"]), subject: "Active", date: recent() });
+    for (let i = 0; i < 20; i++) gmail.threads.set(`o${i}`, { labels: new Set(["INBOX"]), subject: "Report", date: old });
+    const p = await preview("trash_threads_by_query", { query: "in:inbox", older_than_days: 1, max_threads: 10, preview_detail: "full" });
+    assert.deepEqual(
+      p.threads.map((t) => t.thread_id),
+      Array.from({ length: 10 }, (_, i) => `o${i}`),
+    );
+    assert.deepEqual(p.left_out, { newer: 600 });
+    assert.equal(p.more_matches, true);
+    assert.deepEqual(kinds("read"), [10]);
+    assert.deepEqual(gmail.searches, ["newer_than:1d", "newer_than:1d", "in:inbox", "in:inbox"]);
+    const r = await call("trash_threads_by_query", { query: "in:inbox", older_than_days: 1, confirmation_token: p.confirmation_token });
+    assert.equal(r.trashed, 10);
+    assert.ok(!gmail.threads.get("r0").trashed && gmail.threads.get("o9").trashed && !gmail.threads.get("o10").trashed);
+  });
+
+  test("older_than_days leaves out listed threads with a newer message without reading them", async () => {
+    const p = await preview("trash_threads", { thread_ids: ["new", "seen"], older_than_days: 1, preview_detail: "full" });
+    assert.deepEqual(p.threads.map((t) => t.thread_id), ["seen"]);
+    assert.deepEqual(p.left_out, { newer: 1 });
+    assert.deepEqual(kinds("read"), [1]);
   });
 
   test("by default, the trash tools leave out starred threads and threads with a sent message", async () => {

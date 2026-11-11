@@ -129,6 +129,10 @@ const MAX_READ_ATTACHMENT_MB = 10;
 // BATCH_SIZE, a call stays well within the 50 subrequests that the Workers Free plan allows.
 const MAX_BULK_THREADS = 500;
 
+// The largest number of threads with a newer message that a bulk tool with older_than_days finds with a
+// search, to leave them out without reading them. Each 500 threads is one request to Gmail.
+const MAX_RECENT_THREADS = 2500;
+
 // The largest number of threads that a summary counts. Gmail lists at most 500 threads in each request,
 // and a summary counts twice: the matching threads, and the unread ones.
 const MAX_COUNT_THREADS = 2500;
@@ -589,23 +593,37 @@ export function buildServer(
 
   /**
    * Returns the IDs of the threads that match a Gmail search, at most `max`. `more` is true when more
-   * threads match. Like Gmail search, the search leaves out spam and trash.
+   * threads match. Like Gmail search, the search leaves out spam and trash. The search also leaves out
+   * the threads in `skip`, and goes on to later results instead. `skipped` is the number of threads that
+   * it left out for this reason before it found `max` threads.
    */
-  const findThreads = async (a: Account, query: string, max: number): Promise<{ ids: string[]; more: boolean }> => {
+  const findThreads = async (
+    a: Account,
+    query: string,
+    max: number,
+    skip: ReadonlySet<string> = new Set(),
+  ): Promise<{ ids: string[]; more: boolean; skipped: number }> => {
     const ids: string[] = [];
+    let skipped = 0;
     let pageToken: string | undefined;
     let more = false;
+    // The number of pages has a limit, because the search goes past at most each thread of `skip`.
     do {
+      const size = skip.size ? 500 : Math.min(500, max - ids.length + 1);
       const list = await gmail<{ threads?: { id: string }[]; nextPageToken?: string }>(env, a, "/threads", {
-        query: { q: query, maxResults: String(Math.min(500, max - ids.length + 1)), pageToken },
+        query: { q: query, maxResults: String(size), pageToken },
       });
       for (const t of list.threads ?? []) {
-        if (ids.length < max) ids.push(t.id);
-        else more = true;
+        if (ids.length >= max) {
+          more = true;
+          break;
+        }
+        if (skip.has(t.id)) skipped++;
+        else ids.push(t.id);
       }
       pageToken = list.nextPageToken;
     } while (pageToken && !more && ids.length < max);
-    return { ids, more: more || !!pageToken };
+    return { ids, more: more || !!pageToken, skipped };
   };
 
   /** The arguments of a search of one mailbox. */
@@ -1600,7 +1618,8 @@ export function buildServer(
   const safeguardRules =
     "To limit the change to threads that the user has already seen, give older_than_days, seen_only or both. " +
     "older_than_days checks every message of the thread. A Gmail search with older_than: matches a thread by any one old message, " +
-    "also when the thread has a new reply. The preview counts the threads that the safeguards left out, in left_out. " +
+    "also when the thread has a new reply. The tool leaves out the threads with a newer message before it reads them, " +
+    "and goes on to later search results, so that the preview can have max_threads other threads. The preview counts the threads that the safeguards left out, in left_out. " +
     "Those threads still match the search. When many threads are left out, make the search more specific, so that the next preview has other threads. " +
     "The tool never changes drafts, so it also leaves out a thread that has only drafts.";
 
@@ -1710,7 +1729,8 @@ export function buildServer(
    * messages that the preview saw in its threads, when the account and the action are the same as for
    * the preview. `action` gives the arguments that a confirmation must repeat, which the results also
    * show. `select` finds the threads: `list` gives the threads that the call lists, which a confirmation
-   * must also list, and `search` finds the threads that a Gmail search matches. `check` finds a mistake
+   * must also list, and `search` finds the threads that a Gmail search matches, other than the threads
+   * in `skip`, which the safeguards leave out, and counts those threads in `skipped`. `check` finds a mistake
    * in the arguments before the tool reads any thread. `protect` is true when the tool leaves out
    * starred threads and threads with a message that the account sent, unless the call gives
    * include_protected.
@@ -1723,7 +1743,13 @@ export function buildServer(
       action: (args: ShapeOutput<Shape>) => Record<string, unknown>;
       select:
         | { list: (args: ShapeOutput<Shape>) => string[] }
-        | { search: (a: Account, args: ShapeOutput<Shape>) => Promise<{ ids: string[]; more?: boolean }> };
+        | {
+            search: (
+              a: Account,
+              args: ShapeOutput<Shape>,
+              skip: ReadonlySet<string>,
+            ) => Promise<{ ids: string[]; more?: boolean; skipped?: number }>;
+          };
       apply: (a: Account, threads: PreviewThread[], args: ShapeOutput<Shape>) => Promise<CallToolResult | Record<string, unknown>>;
       protect?: boolean;
     },
@@ -1761,7 +1787,22 @@ export function buildServer(
         return text({ ...about, confirmed: true, threads: confirmed.length, ...result });
       }
 
-      const { ids, more = false } = "list" in select ? { ids: select.list(args), more: false } : await select.search(a, args);
+      // A Gmail search matches a thread by any one message, and lists the threads with the newest messages
+      // first. Thus a search for old mail can start with many threads that also have a newer message. Find
+      // those threads with a search, and leave them out without reading them.
+      const newer =
+        args.older_than_days === undefined
+          ? new Set<string>()
+          : new Set((await findThreads(a, `newer_than:${args.older_than_days}d`, MAX_RECENT_THREADS)).ids);
+      let found: { ids: string[]; more?: boolean; skipped?: number };
+      if ("list" in select) {
+        const listed = select.list(args);
+        const ids = listed.filter((id) => !newer.has(id));
+        found = { ids, skipped: listed.length - ids.length };
+      } else {
+        found = await select.search(a, args, newer);
+      }
+      const { ids, more = false, skipped = 0 } = found;
       const read = await readThreads(a, ids, ["From", "Subject", "Date"]);
       const { failed, notFound } = read;
       const rules: Safeguards = {
@@ -1769,7 +1810,7 @@ export function buildServer(
         seenOnly: args.seen_only,
         protect: work.protect === true && !args.include_protected,
       };
-      const leftOut: Partial<Record<LeftOut, number>> = {};
+      const leftOut: Partial<Record<LeftOut, number>> = skipped ? { newer: skipped } : {};
       const now = Date.now();
       const kept = read.threads.filter((t) => {
         const reason = leftOutBy(t, rules, now);
@@ -1884,7 +1925,7 @@ export function buildServer(
     {
       check: (args) => labelProblem(args.add, args.remove),
       action: (args) => ({ query: args.query, add: args.add, remove: args.remove }),
-      select: { search: (a, args) => findThreads(a, args.query, args.max_threads) },
+      select: { search: (a, args, skip) => findThreads(a, args.query, args.max_threads, skip) },
       apply: applyLabels,
     },
   );
@@ -2377,7 +2418,7 @@ export function buildServer(
     },
     {
       action: (args) => ({ query: args.query }),
-      select: { search: (a, args) => findThreads(a, args.query, args.max_threads) },
+      select: { search: (a, args, skip) => findThreads(a, args.query, args.max_threads, skip) },
       apply: applyTrash,
       protect: true,
     },
