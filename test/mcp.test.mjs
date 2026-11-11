@@ -154,6 +154,10 @@ class FakeGmail {
     }
     if (path === "/drafts" && method === "GET") return Response.json({ drafts: [...this.drafts.keys()].map((id) => ({ id })) });
     const draft = /^\/drafts\/([^/]+)$/.exec(path);
+    if (draft && method === "DELETE") {
+      this.drafts.delete(decodeURIComponent(draft[1]));
+      return new Response(null, { status: 204 });
+    }
     if (draft && method === "GET") {
       const [status, body] = this.draft(decodeURIComponent(draft[1]));
       return Response.json(body, { status });
@@ -973,6 +977,13 @@ describe("drafts", () => {
     const { fields } = uploaded();
     assert.equal(fields.From, undefined);
     assert.equal(fields.Subject, "Invoice 42");
+  });
+
+  test("delete_draft deletes the draft", async () => {
+    const r = await call("delete_draft", { draft_id: "d2" });
+    assert.equal(r.draft_id, "d2");
+    assert.deepEqual([...gmail.drafts.keys()], ["d1"]);
+    assert.deepEqual(calls, [{ accountId: "acct-1", change: true }]);
   });
 
   test("update_draft needs a change", async () => {

@@ -17,6 +17,7 @@ export const RELEASE_NOTES: ReleaseDay[] = [
   {
     date: "2026-11-12",
     changes: [
+      "An agent can delete drafts. It still cannot delete email that you received or sent.",
       "An agent can find and edit drafts, so a change to a reply no longer leaves an old copy behind.",
       "An agent can limit a bulk clean-up to mail you have already read, or to mail older than a number of days. By default, bulk trash leaves out starred threads and conversations that you wrote in.",
       "An agent can search or summarise all your mailboxes in one step, for example to find every email from one sender.",

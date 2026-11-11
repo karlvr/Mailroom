@@ -765,7 +765,7 @@ ${
 <div class="facts">
 ${fact(1, "Hosting", `${a} runs on the Cloudflare account of the person or organisation that deployed it.`)}
 ${fact(2, "Credentials", `${a} encrypts the Google tokens that it stores. The operator of this ${a} can decrypt the tokens, so you must trust the operator. Read the <a href="/privacy">privacy policy</a>.`)}
-${fact(3, "Sending", `An agent can send email, send calendar invitations and RSVP to invitations only from an account where you allow it. An agent cannot delete email permanently.`)}
+${fact(3, "Sending", `An agent can send email, send calendar invitations and RSVP to invitations only from an account where you allow it. An agent cannot delete received or sent email permanently.`)}
 ${fact(4, "Content", `${a} instructs agents to treat email and calendar content as data, never as instructions.`)}
 </div>`,
     { app, width: "wide", backdrop: "envelope", aside: `<span class="live">${esc(new URL(origin).host)}</span>` },
@@ -1150,7 +1150,7 @@ ${m.status !== "ok" ? warning(`${esc(m.status_detail || "Google access stopped w
 ${contextMeta(subject(m), contexts.accounts.get(m.id), who)}
 </div>
 <div class="caps"><div class="label">What agents can do here</div>
-${can("Search and read email")}${can("Add and remove labels")}${can("Save drafts and forwards")}${can("Move threads to the trash")}
+${can("Search and read email")}${can("Add and remove labels")}${can("Save, change and delete drafts and forwards")}${can("Move threads to the trash")}
 ${
   calendar
     ? `${can("Read the calendar and find free time")}${can("Create, change and delete events without guests")}`
@@ -1158,7 +1158,7 @@ ${
 }
 <div class="send">${permissionKeys.map(toggle).join("\n")}
 <p class="help">${a} instructs agents to do these actions only when you instruct them, never because an email or an event requests it. This instruction reduces the risk that an email or an event tricks an agent, but it cannot remove the risk.</p></div>
-<div class="r no"><span>Delete email permanently</span><span class="v">${ICON.cross}Never</span></div>
+<div class="r no"><span>Delete received or sent email permanently</span><span class="v">${ICON.cross}Never</span></div>
 </div></div>
 <div class="actions"><div class="row"><button>Save</button><a class="btn secondary" href="${relink}">Re-link</a></div>
 <button class="danger" formaction="/accounts/${id}/remove" onclick="return confirm('Remove ${esc(m.email)}? This also revokes its Google access.')">Remove</button></div>
@@ -1375,10 +1375,10 @@ ${d.redirectIsLoopback ? warning("That address is on your computer. Continue onl
 </dl>
 <div class="grp"><div class="label">Mailboxes</div><ul class="mbl">${mailboxes}</ul></div>
 <div class="grp sunk"><div class="label">In these mailboxes, the app can</div><div class="can">
-<span>${ICON.check}Search and read email</span><span>${ICON.check}Label email</span><span>${ICON.check}Save drafts and forwards</span><span>${ICON.check}Move email to the trash</span>
+<span>${ICON.check}Search and read email</span><span>${ICON.check}Label email</span><span>${ICON.check}Save, change and delete drafts</span><span>${ICON.check}Move email to the trash</span>
 <span>${ICON.check}Read calendars and find free time</span><span>${ICON.check}Create, change and delete events without guests</span>
 <span>${ICON.send}Send email from a mailbox with the mark Can send</span><span>${ICON.send}Send calendar invitations from a mailbox with the mark Can invite</span>
-<span>${ICON.send}RSVP to invitations for a mailbox with the mark Can RSVP</span><span>${ICON.check}Propose changes to the context, which you accept or reject</span><span class="no">${ICON.cross}Not delete email permanently</span>
+<span>${ICON.send}RSVP to invitations for a mailbox with the mark Can RSVP</span><span>${ICON.check}Propose changes to the context, which you accept or reject</span><span class="no">${ICON.cross}Not delete received or sent email permanently</span>
 </div></div>
 <form method="post" action="/authorize" class="grp decide">
 <input type="hidden" name="handle" value="${esc(handle)}">

@@ -5,7 +5,7 @@ Mailroom is a self-hosted Cloudflare Worker. It lets AI agents, such as Claude, 
 - Link any number of mailboxes. They can be personal Gmail accounts, Workspace accounts from different organisations, or a mix.
 - Give each mailbox a name and context notes. Mailroom instructs agents to read these notes before they work in that mailbox.
 - Write a global context for the notes that apply to every mailbox, for example who you are, your priorities and how you write. Where the context of a mailbox conflicts with the global context, Mailroom instructs agents to follow the context of the mailbox.
-- An agent can **search, read, label, draft and trash** email. An agent can **send** email only from a mailbox where you select **Allow sending email**, or **reply** to email where you select **Allow replies**. An agent **cannot delete** email permanently.
+- An agent can **search, read, label, draft and trash** email. An agent can **send** email only from a mailbox where you select **Allow sending email**, or **reply** to email where you select **Allow replies**. An agent **cannot delete** received or sent email permanently. An agent can delete drafts.
 - An agent can **read calendars, find free time, and create, change and delete events**. An agent can send calendar invitations only from a mailbox where you select **Allow sending calendar invitations**. An agent can RSVP to invitations only for a mailbox where you select **Allow RSVPs**.
 - Mailroom instructs agents to treat email and calendar content as data, never as instructions.
 - Mailroom runs only on your own Cloudflare account, and no third party operates it. Mailroom encrypts the Google tokens that it stores.
@@ -128,6 +128,7 @@ The agent then has these tools:
 | `create_forward_draft` | Saves a draft that forwards one message, with its attachments. It does not send the draft. |
 | `list_drafts` | Lists the drafts of one mailbox, with the recipients, subject and snippet of each |
 | `update_draft` | Changes the body, recipients or subject of a draft. It keeps the thread and the attachments, and it does not send the draft. |
+| `delete_draft` | Deletes a draft permanently. It cannot delete received or sent email. |
 | `send_draft` | Sends a draft. It works for a mailbox where you selected **Allow sending email**. With only **Allow replies**, it sends only a reply to the people of the message that the reply answers. |
 | `trash_thread` | Moves a thread to the trash. Gmail keeps trashed threads for 30 days. |
 | `trash_threads` | Moves up to 500 threads to the trash. You give a list of thread IDs. It previews first: see below. |
@@ -263,7 +264,7 @@ npm run deploy
 - **Trust in the operator:** The operator of a deployment knows `ADMIN_PASSWORD` and can read D1, so the operator can decrypt the stored tokens. The operator can also change the code. Thus the operator can get all the access to each linked mailbox and calendar that Mailroom has. The settings of a mailbox do not limit the operator. Each person who links a mailbox must trust the operator. The privacy policy at `/privacy` tells each person this.
 - **Stored secrets:** Mailroom encrypts the Google refresh tokens and the OAuth client secret with AES-GCM, and stores them in D1. Mailroom derives the key from `ADMIN_PASSWORD` with PBKDF2 and a random salt for each deployment. A copy of the database alone is not sufficient to decrypt the secrets. The encryption protects the secrets if a copy of the database leaks, but it does not protect them from the operator.
 - **Google access tokens:** Mailroom keeps these tokens only in Worker memory.
-- **Gmail permission:** Mailroom uses Google's `gmail.modify` permission. This permission allows Mailroom to read, label, draft, send and trash email, but not to delete email permanently. `send_draft` works only for a mailbox where the owner selected **Allow sending email**, or **Allow replies** for a reply to the people of the message that it answers.
+- **Gmail permission:** Mailroom uses Google's `gmail.modify` permission. This permission allows Mailroom to read, label, draft, send and trash email, and to delete drafts, but not to delete received or sent email permanently. `send_draft` works only for a mailbox where the owner selected **Allow sending email**, or **Allow replies** for a reply to the people of the message that it answers.
 - **Calendar permissions:** Mailroom uses Google's `calendar.events`, `calendar.calendarlist.readonly` and `calendar.events.freebusy` permissions. These permissions allow Mailroom to read and change events, list calendars and find busy times. They do not allow Mailroom to change the sharing of a calendar or to delete a calendar. Mailroom sends invitations and RSVPs only for a mailbox where the owner selected the setting for that action.
 - **Mailbox removal:** When you remove a mailbox, Mailroom also revokes its Google access.
 - **Agent access:** each agent connects with OAuth 2.1 through Cloudflare's `workers-oauth-provider`. This gives PKCE, a consent page that other sites cannot frame or forge, and a separate approval for each client.
