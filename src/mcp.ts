@@ -597,6 +597,8 @@ export function buildServer(
     /** The names of the labels of the mailbox, by label ID. */
     labels: Map<string, string>;
     nextPageToken: string | null;
+    /** The matching threads that Gmail did not read, with the error of each. `threads` does not have them. */
+    failed: { thread_id: string; error: string }[];
   }
 
   /** Searches one mailbox, and reads each matching thread. */
@@ -604,11 +606,12 @@ export function buildServer(
     const list = await gmail<{ threads?: { id: string }[]; nextPageToken?: string }>(env, a, "/threads", {
       query: { q: args.query, maxResults: String(args.max_results), pageToken: args.page_token },
     });
-    const [{ byId }, { threads }] = await Promise.all([
+    // A thread that Gmail did not find was deleted after the search, so the result leaves it out.
+    const [{ byId }, { threads, failed }] = await Promise.all([
       labelMap(env, a),
       readThreads(a, (list.threads ?? []).map((t) => t.id), SEARCH_HEADERS),
     ]);
-    return { threads, labels: byId, nextPageToken: list.nextPageToken ?? null };
+    return { threads, labels: byId, nextPageToken: list.nextPageToken ?? null, failed };
   };
 
   /** The result of work in one account of a tool that works in every account. */
@@ -810,6 +813,14 @@ export function buildServer(
         query: args.query,
         threads: hits.threads.map((t) => threadRow(t, hits.labels, args.detail)),
         next_page_token: hits.nextPageToken,
+        ...(hits.failed.length
+          ? {
+              not_read: hits.failed,
+              note:
+                "Gmail did not read the threads in not_read, so the result does not have them. The other threads are complete. " +
+                "To try again, call search_threads again with the same arguments, or read each of those threads with get_thread.",
+            }
+          : {}),
       });
     },
   );
@@ -826,8 +837,21 @@ export function buildServer(
       inputSchema: { account: z.string(), ...summaryInput },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async (a, args: SummaryArgs & { account: string }) =>
-      text({ account: a.email, query: args.query, ...(await summariseThreads(a, args, MAX_COUNT_THREADS)) }),
+    async (a, args: SummaryArgs & { account: string }) => {
+      const summary = await summariseThreads(a, args, MAX_COUNT_THREADS);
+      return text({
+        account: a.email,
+        query: args.query,
+        ...summary,
+        ...("not_read" in summary
+          ? {
+              note:
+                "not_read is the number of threads that Gmail did not read. The groups do not have them, but the counts are complete. " +
+                "To try again, call summarise_threads again with the same arguments.",
+            }
+          : {}),
+      });
+    },
   );
 
   /** The rule for a tool that gives results from every account. */
@@ -865,21 +889,34 @@ export function buildServer(
       );
       const time = (t: GmailThread) => messageTime(t.messages?.[t.messages.length - 1]) ?? "";
       hits.sort((x, y) => time(y.thread).localeCompare(time(x.thread)));
+      const notes = [
+        ...(maxResults(extra) < args.max_results
+          ? [
+              `With ${outcomes.length} accounts, the tool read at most ${maxResults(extra)} threads in each account. ` +
+                "To read more threads of one account, use search_threads.",
+            ]
+          : []),
+        ...(outcomes.some((o) => !("result" in o) || o.result.failed.length)
+          ? [
+              "The result does not have the threads of an account with an error, or the threads in not_read of an account. " +
+                "The other threads are complete. To try again, call search_all_accounts again, or use search_threads for one account.",
+            ]
+          : []),
+      ];
       return text({
         query: args.query,
         threads: hits.map((h) => ({ account: h.email, ...threadRow(h.thread, h.labels, args.detail) })),
         accounts: outcomes.map((o) =>
           "result" in o
-            ? { account: o.account.email, threads: o.result.threads.length, ...(o.result.nextPageToken ? { more_matches: true } : {}) }
+            ? {
+                account: o.account.email,
+                threads: o.result.threads.length,
+                ...(o.result.nextPageToken ? { more_matches: true } : {}),
+                ...(o.result.failed.length ? { not_read: o.result.failed } : {}),
+              }
             : { account: o.account.email, error: o.error },
         ),
-        ...(maxResults(extra) < args.max_results
-          ? {
-              note:
-                `With ${outcomes.length} accounts, the tool read at most ${maxResults(extra)} threads in each account. ` +
-                "To read more threads of one account, use search_threads.",
-            }
-          : {}),
+        ...(notes.length ? { note: notes.join(" ") } : {}),
       });
     },
   );
@@ -913,19 +950,27 @@ export function buildServer(
       );
       if (!outcomes.length) return text(noMailboxes);
       const summaries = outcomes.flatMap((o) => ("result" in o ? [o.result] : []));
+      const notes = [
+        ...(args.group_by && maxThreads(extra) < args.max_threads
+          ? [
+              `With ${outcomes.length} accounts, the tool grouped at most ${maxThreads(extra)} threads in each account. ` +
+                "To group more threads of one account, use summarise_threads.",
+            ]
+          : []),
+        ...(outcomes.some((o) => !("result" in o) || "not_read" in o.result)
+          ? [
+              "The counts do not include an account with an error, and the groups of an account do not have the threads in its not_read. " +
+                "The rest is complete. To try again, call summarise_all_accounts again, or use summarise_threads for one account.",
+            ]
+          : []),
+      ];
       return text({
         query: args.query,
         total: summaries.reduce((n, r) => n + r.total, 0),
         unread: summaries.reduce((n, r) => n + r.unread, 0),
         ...(summaries.some((r) => "more_matches" in r) ? { more_matches: true } : {}),
         accounts: outcomes.map((o) => ("result" in o ? { account: o.account.email, ...o.result } : { account: o.account.email, error: o.error })),
-        ...(args.group_by && maxThreads(extra) < args.max_threads
-          ? {
-              note:
-                `With ${outcomes.length} accounts, the tool grouped at most ${maxThreads(extra)} threads in each account. ` +
-                "To group more threads of one account, use summarise_threads.",
-            }
-          : {}),
+        ...(notes.length ? { note: notes.join(" ") } : {}),
       });
     },
   );
@@ -1962,7 +2007,8 @@ export function buildServer(
         query: { q: args.query, maxResults: String(args.max_results), pageToken: args.page_token },
       });
       const ids = (list.drafts ?? []).map((d) => d.id);
-      const { done } = await eachItem(a, ids, (id) => ({ method: "GET", path: `/drafts/${encodeURIComponent(id)}?format=metadata` }));
+      // A draft that Gmail did not find was sent or deleted after the list, so the result leaves it out.
+      const { done, failed } = await eachItem(a, ids, (id) => ({ method: "GET", path: `/drafts/${encodeURIComponent(id)}?format=metadata` }));
       const drafts = ids.flatMap((id) => {
         const d = done.get(id) as GmailDraft | undefined;
         if (!d) return [];
@@ -1979,7 +2025,19 @@ export function buildServer(
           },
         ];
       });
-      return text({ account: a.email, drafts, next_page_token: list.nextPageToken ?? null });
+      return text({
+        account: a.email,
+        drafts,
+        next_page_token: list.nextPageToken ?? null,
+        ...(failed.length
+          ? {
+              not_read: failed.map(({ id, error }) => ({ draft_id: id, error })),
+              note:
+                "Gmail did not read the drafts in not_read, so the result does not have them. The other drafts are complete. " +
+                "To try again, call list_drafts again with the same arguments.",
+            }
+          : {}),
+      });
     },
   );
 

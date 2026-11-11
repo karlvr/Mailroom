@@ -92,6 +92,8 @@ class FakeGmail {
     this.issued = new Set();
     /** Thread IDs whose next modify gets 429 once. */
     this.rateLimitOnce = new Set();
+    /** Thread and draft IDs whose reads in a batch always fail with 403, which Mailroom does not try again. */
+    this.readFails = new Set();
     /** When true, the next batch rejects the token of every call, as Gmail does for an expired token. */
     this.rejectTokenOnce = false;
   }
@@ -254,10 +256,13 @@ class FakeGmail {
         const read = /^\/gmail\/v1\/users\/me\/threads\/([^/?]+)\?format=metadata&/.exec(c.path);
         const draft = /^\/gmail\/v1\/users\/me\/drafts\/([^/?]+)\?format=metadata$/.exec(c.path);
         const m = /^\/gmail\/v1\/users\/me\/threads\/([^/]+)\/(modify|trash)$/.exec(c.path);
-        if (read && c.method === "GET") {
-          [status, body] = this.read(decodeURIComponent(read[1]));
+        const readId = decodeURIComponent((read ?? draft)?.[1] ?? "");
+        if (c.method === "GET" && this.readFails.has(readId)) {
+          [status, body] = [403, { error: { code: 403, message: "The read failed." } }];
+        } else if (read && c.method === "GET") {
+          [status, body] = this.read(readId);
         } else if (draft && c.method === "GET") {
-          [status, body] = this.draft(decodeURIComponent(draft[1]));
+          [status, body] = this.draft(readId);
         } else {
           assert.ok(m && c.method === "POST", `unexpected batch call ${c.method} ${c.path}`);
           const id = decodeURIComponent(m[1]);
@@ -654,6 +659,20 @@ describe("search_threads", () => {
     assert.deepEqual(kinds("read"), [25, 25]);
   });
 
+  test("gives the threads that Gmail read, and the threads that it did not read", async () => {
+    gmail.readFails.add("t2");
+    const r = await call("search_threads", { query: failures, max_results: 3 });
+    assert.deepEqual(r.threads.map((t) => t.thread_id), ["t0", "t4"]);
+    assert.deepEqual(r.not_read, [{ thread_id: "t2", error: "The read failed." }]);
+    assert.match(r.note, /To try again, call search_threads again/);
+  });
+
+  test("gives no note when Gmail read every thread", async () => {
+    const r = await call("search_threads", { query: failures, max_results: 3 });
+    assert.equal(r.not_read, undefined);
+    assert.equal(r.note, undefined);
+  });
+
   test("gives full rows on request", async () => {
     const r = await call("search_threads", { query: failures, max_results: 1, detail: "full" });
     assert.deepEqual(r.threads[0], {
@@ -706,6 +725,15 @@ describe("summarise_threads", () => {
     assert.deepEqual(bySubject.groups[0].senders, ["GitHub <notifications@github.com>", "noreply@github.com"]);
   });
 
+  test("counts the threads that Gmail did not read, and keeps the counts complete", async () => {
+    gmail.readFails.add("a1");
+    const r = await call("summarise_threads", { group_by: "sender" });
+    assert.equal(r.total, 4);
+    assert.equal(r.grouped_threads, 3);
+    assert.equal(r.not_read, 1);
+    assert.match(r.note, /To try again, call summarise_threads again/);
+  });
+
   test("gets one access token, also when its requests run at the same time", async () => {
     await call("summarise_threads", { group_by: "sender" });
     assert.equal(gmail.tokenRequests, 1);
@@ -753,8 +781,23 @@ describe("tools for every account", () => {
       { account: "two@example.com", threads: 2, more_matches: true },
     ]);
     assert.match(r.accounts[2].error, /old@example.com cannot be decrypted/);
+    assert.match(r.note, /does not have the threads of an account with an error/);
     assert.deepEqual(calls.map((c) => c.accountId).sort(), ["acct-1", "acct-2", "acct-3"]);
     assert.ok(calls.every((c) => !c.change));
+  });
+
+  test("search_all_accounts gives the threads that Gmail did not read in each account", async () => {
+    mod.OTHER_ACCOUNTS.pop();
+    gmail.readFails.add("t2");
+    const r = await callAll("search_all_accounts", { query: failures, max_results: 2 });
+    assert.deepEqual(r.threads.map((t) => [t.account, t.thread_id]), [["me@example.com", "t0"], ["two@example.com", "t0"]]);
+    assert.deepEqual(r.accounts[0], {
+      account: "me@example.com",
+      threads: 1,
+      more_matches: true,
+      not_read: [{ thread_id: "t2", error: "The read failed." }],
+    });
+    assert.match(r.note, /threads in not_read of an account.*To try again, call search_all_accounts again/);
   });
 
   test("summarise_all_accounts adds the counts of the accounts", async () => {
@@ -764,7 +807,7 @@ describe("tools for every account", () => {
     assert.equal(r.unread, 2);
     assert.deepEqual(r.accounts[0].groups.map((g) => [g.key, g.threads]), [["monitor@example.com", 30]]);
     assert.ok(r.accounts[2].error);
-    assert.equal(r.note, undefined);
+    assert.match(r.note, /^The counts do not include an account with an error/);
   });
 
   /** Adds linked accounts, so that the user has `count` accounts in all. */
@@ -1092,6 +1135,14 @@ describe("drafts", () => {
       { draft_id: "d2", thread_id: "r2", to: "carol@example.com", cc: null, subject: "Invoice", date: null, snippet: "Hello" },
     ]);
     assert.deepEqual(kinds("read"), [2]);
+  });
+
+  test("list_drafts gives the drafts that Gmail read, and the drafts that it did not read", async () => {
+    gmail.readFails.add("d1");
+    const r = await call("list_drafts", {});
+    assert.deepEqual(r.drafts.map((d) => d.draft_id), ["d2"]);
+    assert.deepEqual(r.not_read, [{ draft_id: "d1", error: "The read failed." }]);
+    assert.match(r.note, /To try again, call list_drafts again/);
   });
 
   test("update_draft changes the body, and keeps the sender, the recipients and the reply headers", async () => {
