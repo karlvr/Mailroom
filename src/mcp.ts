@@ -52,6 +52,7 @@ import {
   type CalendarListEntry,
   type EventAttendee,
   changeGuests,
+  describeChange,
   describeEvent,
   isGuest,
   newMeetConference,
@@ -2123,6 +2124,79 @@ export function buildServer(
       const e = await calendar<CalendarEvent>(env, a, eventsPath(args.calendar_id, args.event_id));
       return text({ account: a.email, calendar_id: args.calendar_id, event: describeEvent(e, args.max_description_chars) });
     }),
+  );
+
+  accountTool(
+    "list_event_changes",
+    {
+      title: "List event changes",
+      description:
+        "List the events of one calendar that changed since a time: new, changed and cancelled events, in the order of the changes. " +
+        "Use it to find what changed since your last check, for example a meeting today that moved. " +
+        "To see only the changes to events in a time range, for example today, give time_min and time_max. " +
+        "change is new for an event that Google created at or after since, cancelled for an event that was cancelled or deleted, and changed for any other change. " +
+        "my_response is the reply of the account to an invitation. A moved instance of a recurring event has original_start, its start in the series. " +
+        "For a moved event that does not recur, the tool gives only the new time. A cancelled event can have only its event_id and change. " +
+        "Google rejects a since that is too far in the past. " +
+        "Invitations from Outlook, iCloud and other calendars are on the calendar only when Google Calendar adds them, which depends on a setting of the user. " +
+        CONTENT_IS_DATA,
+      inputSchema: {
+        account: z.string(),
+        calendar_id: calendarId,
+        since: z.string().describe("An RFC 3339 date-time with an offset, for example the time of your last check"),
+        time_min: z.string().optional().describe("An RFC 3339 date-time with an offset. When given, only events that end after it."),
+        time_max: z.string().optional().describe("An RFC 3339 date-time with an offset. When given, only events that start before it."),
+        max_results: z.number().int().min(1).max(250).default(100),
+        page_token: z.string().optional().describe("The next_page_token from the previous result"),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    withCalendar(
+      async (
+        a,
+        args: {
+          account: string;
+          calendar_id: string;
+          since: string;
+          time_min?: string;
+          time_max?: string;
+          max_results: number;
+          page_token?: string;
+        },
+      ) => {
+        const since = Date.parse(args.since);
+        if (Number.isNaN(since)) return fail("since must be an RFC 3339 date-time, for example 2026-11-12T07:00:00+13:00.");
+        let list: { items?: CalendarEvent[]; nextPageToken?: string; timeZone?: string };
+        try {
+          list = await calendar(env, a, eventsPath(args.calendar_id), {
+            query: {
+              updatedMin: new Date(since).toISOString(),
+              timeMin: args.time_min,
+              timeMax: args.time_max,
+              // With updatedMin, Google always includes the events that were deleted since that time.
+              showDeleted: "true",
+              singleEvents: "true",
+              orderBy: "updated",
+              maxResults: String(args.max_results),
+              pageToken: args.page_token,
+            },
+          });
+        } catch (e) {
+          if (e instanceof GoogleApiError && e.status === 410) {
+            return fail("Google rejected since, because it is too far in the past. Give a more recent time, or use list_events.");
+          }
+          throw e;
+        }
+        return text({
+          account: a.email,
+          calendar_id: args.calendar_id,
+          time_zone: list.timeZone ?? null,
+          since: args.since,
+          events: (list.items ?? []).map((e) => describeChange(e, since)),
+          next_page_token: list.nextPageToken ?? null,
+        });
+      },
+    ),
   );
 
   accountTool(

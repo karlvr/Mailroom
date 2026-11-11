@@ -72,6 +72,11 @@ class FakeGmail {
     this.mailThreads = new Map();
     /** The IDs of the drafts that Gmail sent. */
     this.sent = [];
+    /** The events of the primary calendar, and the query of each request for them. */
+    this.events = [];
+    this.eventQueries = [];
+    /** When true, the calendar rejects each request for events with 410, as for an updatedMin that is too old. */
+    this.eventsGone = false;
     /** The drafts that the upload API replaced: the ID, the metadata and the message of each. */
     this.uploads = [];
     /** The number of requests that the fake got, as Workers counts subrequests. */
@@ -136,6 +141,11 @@ class FakeGmail {
     const auth = new Headers(init.headers).get("Authorization");
     if (url.href === "https://gmail.googleapis.com/batch/gmail/v1") return this.batch(init, auth);
     if (!this.issued.has(auth)) return Response.json({ error: { code: 401, message: "bad token" } }, { status: 401 });
+    if (url.pathname === "/calendar/v3/calendars/primary/events" && method === "GET") {
+      this.eventQueries.push(Object.fromEntries(url.searchParams));
+      if (this.eventsGone) return Response.json({ error: { code: 410, message: "The requested minimum modification time lies too far in the past." } }, { status: 410 });
+      return Response.json({ timeZone: "Pacific/Auckland", items: this.events });
+    }
     const path = url.pathname.replace("/gmail/v1/users/me", "");
     if (path === "/labels" && method === "GET") return Response.json({ labels: this.labels });
     if (path === "/labels" && method === "POST") {
@@ -989,6 +999,60 @@ describe("drafts", () => {
   test("update_draft needs a change", async () => {
     assert.match((await call("update_draft", { draft_id: "d1" })).text, /at least one field/);
     assert.deepEqual(gmail.uploads, []);
+  });
+});
+
+describe("list_event_changes", () => {
+  const calendarScopes = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+    "https://www.googleapis.com/auth/calendar.events.freebusy",
+  ].join(" ");
+  let scopes;
+  beforeEach(() => {
+    scopes = mod.TEST_ACCOUNT.scopes;
+    mod.TEST_ACCOUNT.scopes = calendarScopes;
+    const at = (dateTime) => ({ dateTime, timeZone: "Pacific/Auckland" });
+    gmail.events = [
+      { id: "new", status: "confirmed", created: "2026-11-12T01:00:00Z", updated: "2026-11-12T01:00:00Z", summary: "Coffee", start: at("2026-11-12T15:00:00+13:00"), end: at("2026-11-12T15:30:00+13:00") },
+      {
+        id: "moved_20261112",
+        recurringEventId: "moved",
+        status: "confirmed",
+        created: "2026-10-01T00:00:00Z",
+        updated: "2026-11-12T02:00:00Z",
+        summary: "Stand-up",
+        start: at("2026-11-12T11:00:00+13:00"),
+        end: at("2026-11-12T11:15:00+13:00"),
+        originalStartTime: at("2026-11-12T10:00:00+13:00"),
+        attendees: [{ email: "me@example.com", self: true, responseStatus: "needsAction" }],
+      },
+      { id: "gone", status: "cancelled" },
+    ];
+  });
+  afterEach(() => {
+    mod.TEST_ACCOUNT.scopes = scopes;
+  });
+
+  test("lists new, changed and cancelled events since a time", async () => {
+    const r = await call("list_event_changes", { since: "2026-11-12T08:00:00+13:00", time_min: "2026-11-12T00:00:00+13:00" });
+    assert.deepEqual(r.events.map((e) => [e.event_id, e.change, e.original_start ?? null, e.my_response]), [
+      ["new", "new", null, null],
+      ["moved_20261112", "changed", "2026-11-12T10:00:00+13:00", "needsAction"],
+      ["gone", "cancelled", null, null],
+    ]);
+    const [q] = gmail.eventQueries;
+    assert.equal(q.updatedMin, "2026-11-11T19:00:00.000Z");
+    assert.equal(q.timeMin, "2026-11-12T00:00:00+13:00");
+    assert.equal(q.showDeleted, "true");
+    assert.equal(q.singleEvents, "true");
+  });
+
+  test("explains a since that is too far in the past", async () => {
+    gmail.eventsGone = true;
+    assert.match((await call("list_event_changes", { since: "2026-01-01T00:00:00Z" })).text, /too far in the past/);
+    assert.match((await call("list_event_changes", { since: "yesterday" })).text, /RFC 3339/);
   });
 });
 

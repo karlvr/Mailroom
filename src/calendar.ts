@@ -37,6 +37,8 @@ export interface CalendarEvent {
   end?: EventTime;
   /** The ID of the recurring event that this event is one instance of. */
   recurringEventId?: string;
+  /** For an instance of a recurring event, the start of the instance in the series, before any move. */
+  originalStartTime?: EventTime;
   recurrence?: string[];
   organizer?: EventPerson;
   creator?: EventPerson;
@@ -105,13 +107,38 @@ export function newMeetConference() {
 const meetLink = (e: CalendarEvent) =>
   e.hangoutLink ?? e.conferenceData?.entryPoints?.find((p) => p.entryPointType === "video")?.uri ?? null;
 
+/** How an event changed since a time. */
+export type EventChange = "new" | "changed" | "cancelled";
+
+/** Returns how an event changed since `since`, in milliseconds since the epoch. An event is new when Google created it at or after that time. */
+export function eventChange(e: CalendarEvent, since: number): EventChange {
+  if (e.status === "cancelled") return "cancelled";
+  return Date.parse(e.created ?? "") >= since ? "new" : "changed";
+}
+
+const timeOf = (t: EventTime | undefined) => t?.dateTime ?? t?.date ?? null;
+
+/**
+ * Returns an event as a list of changes gives it: how it changed, the time of the change, and the
+ * summary of the event. A moved instance of a recurring event also has its start in the series.
+ */
+export function describeChange(e: CalendarEvent, since: number) {
+  const original = timeOf(e.originalStartTime);
+  return {
+    change: eventChange(e, since),
+    updated: e.updated ?? null,
+    ...summariseEvent(e),
+    ...(original && original !== timeOf(e.start) ? { original_start: original } : {}),
+  };
+}
+
 export function summariseEvent(e: CalendarEvent) {
   return {
     event_id: e.id,
     recurring_event_id: e.recurringEventId ?? null,
     summary: e.summary ?? "(no title)",
-    start: e.start?.dateTime ?? e.start?.date ?? null,
-    end: e.end?.dateTime ?? e.end?.date ?? null,
+    start: timeOf(e.start),
+    end: timeOf(e.end),
     all_day: !!e.start?.date,
     location: e.location ?? null,
     status: e.status ?? null,

@@ -135,6 +135,7 @@ The agent then has these tools:
 | `trash_threads_by_query` | Moves each thread that matches a Gmail search to the trash, up to 500 threads. It previews first: see below. |
 | `list_calendars` | Lists the calendars of one mailbox |
 | `list_events` | Lists the events of one calendar in a time range. It can also search the events. |
+| `list_event_changes` | Lists the events of one calendar that are new, changed or cancelled since a time, with the reply of the mailbox to each invitation |
 | `get_event` | Reads one event, with its description as plain text and the reply of each guest |
 | `query_free_busy` | Finds the busy times of calendars, or of other people who share their availability |
 | `create_event` | Creates an event, with an optional Google Meet link. To invite guests, it needs **Allow sending calendar invitations**. |
