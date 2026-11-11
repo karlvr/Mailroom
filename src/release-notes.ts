@@ -17,6 +17,7 @@ export const RELEASE_NOTES: ReleaseDay[] = [
   {
     date: "2026-11-12",
     changes: [
+      "Agents can keep notes between runs, such as when the last briefing ran or which threads already got an update, so they no longer rebuild this from labels.",
       "An agent can read attachments: text and log files, calendar files, and PDF, Word and Excel documents, for example to find the amount and due date of an invoice.",
       "An agent can read the details of an invitation in an email, from Google, Outlook or iCloud: the time, the organizer and who accepted.",
       "An agent can find the calendar events that are new, moved or cancelled since it last checked, also invitations from Outlook and iCloud that Google Calendar added.",

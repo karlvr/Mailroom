@@ -8,6 +8,7 @@ import {
   type ContextVersion,
   GLOBAL_CONTEXT,
   MAX_CONTEXT_CHARS,
+  MAX_STATE_DAYS,
   PERMISSION_LABELS,
   USAGE_DAYS,
   accountPermissions,
@@ -784,8 +785,9 @@ ${section(
 <li>For each mailbox that you link: its address, its short name, its context notes, the settings <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, <b>${esc(PERMISSION_LABELS.replyEmail)}</b>, <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.rsvp)}</b>, the Google permissions that you granted, and a Google refresh token. ${a} encrypts the token before it stores it.</li>
 <li>For your global context and for each mailbox: each version of the context notes that you saved or accepted, when the version became current, and who made it. For a change that an agent proposed, ${a} also stores the name of the app, and the name and the reason that the agent gave. ${a} deletes a proposal when you reject it.</li>
 <li>For each mailbox: the number of tool calls that agents made on each day, the number of those calls that made changes, and the time of the last call. When an agent uses the mailbox, ${a} deletes the counts that are older than ${USAGE_DAYS} days.</li>
+<li>For your global context and for each mailbox: the notes that agents save between runs, for example which threads already got an update, with the app and the name of the agent that saved each note. ${a} deletes a note when it expires, at most ${MAX_STATE_DAYS} days after an agent saved it.</li>
 <li>Your web session, a record of each agent connection that you approve, and the version of the tool list that each connection loaded last.</li></ul>
-<p>${a} does not store the content of your email or your calendar events.</p>`,
+<p>${a} does not store the content of your email or your calendar events, other than the text that agents put in their notes.</p>`,
 )}
 ${section(
   `How ${a} uses your Google data`,
@@ -809,7 +811,7 @@ ${section(
 )}
 ${section(
   "Remove your data",
-  `<ul><li>To unlink a mailbox, click <b>Remove</b> on the ${a} home page. ${a} deletes the stored token, the context history and the usage counts, and revokes the Google access of that mailbox.</li>
+  `<ul><li>To unlink a mailbox, click <b>Remove</b> on the ${a} home page. ${a} deletes the stored token, the context history, the usage counts and the agent notes, and revokes the Google access of that mailbox.</li>
 <li>To stop the access of an agent, remove the ${a} connector in the app of that agent.</li>
 <li>You can also revoke the access of ${a} on the <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">third-party connections</a> page of your Google account.</li>
 <li>To delete all your data, contact the operator of ${a}.</li></ul>`,

@@ -1,11 +1,10 @@
 // Tests the SQL of the bulk confirmations in src/db.ts, with every migration applied to SQLite, the
-// database engine of D1. A small shim gives the parts of the D1 API that the functions use.
+// database engine of D1.
 import { before, test } from "node:test";
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { build } from "esbuild";
+import { insertRow, sqliteEnv } from "./support/sqlite-env.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 let db;
@@ -23,43 +22,7 @@ before(async () => {
 });
 
 /** Returns an Env whose DB is a new SQLite database with every migration. */
-async function freshEnv() {
-  const sqlite = new DatabaseSync(":memory:");
-  for (const f of (await readdir(join(root, "migrations"))).sort()) sqlite.exec(await readFile(join(root, "migrations", f), "utf8"));
-  const statement = (sql, params = []) => ({
-    sql,
-    params,
-    bind: (...p) => statement(sql, p),
-    first: async () => sqlite.prepare(sql).get(...params) ?? null,
-    all: async () => ({ results: sqlite.prepare(sql).all(...params) }),
-    run: async () => sqlite.prepare(sql).run(...params),
-  });
-  const DB = {
-    prepare: (sql) => statement(sql),
-    batch: async (list) => {
-      sqlite.exec("BEGIN");
-      try {
-        for (const s of list) sqlite.prepare(s.sql).run(...s.params);
-        sqlite.exec("COMMIT");
-      } catch (e) {
-        sqlite.exec("ROLLBACK");
-        throw e;
-      }
-    },
-  };
-  return { env: { DB }, sqlite };
-}
-
-/** Inserts a row with the given values, and a placeholder in each other column that must have a value. */
-function insertRow(sqlite, table, values) {
-  const row = { ...values };
-  for (const c of sqlite.prepare(`PRAGMA table_info(${table})`).all()) {
-    if (c.name in row || !c.notnull || c.dflt_value !== null) continue;
-    row[c.name] = /INT/i.test(c.type) ? 0 : "x";
-  }
-  const names = Object.keys(row);
-  sqlite.prepare(`INSERT INTO ${table} (${names.join(", ")}) VALUES (${names.map(() => "?").join(", ")})`).run(...Object.values(row));
-}
+const freshEnv = async () => sqliteEnv();
 
 const preview = (over = {}) => ({
   tokenHash: "hash-1",

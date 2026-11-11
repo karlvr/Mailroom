@@ -1,6 +1,9 @@
 // Replaces the D1 parts of src/db.ts in the tests. Everything else comes from the real module.
 export * from "../../src/db";
+import * as real from "../../src/db";
 import type { Account, GoogleConfig } from "../../src/db";
+// @ts-expect-error The module is JavaScript without types.
+import { sqliteEnv } from "./sqlite-env.mjs";
 
 export const TEST_ACCOUNT: Account = {
   id: "acct-1",
@@ -52,3 +55,12 @@ export const takeBulkConfirmation = async (_env: unknown, tokenHash: string, acc
 };
 
 export const contextSummaries = async () => ({ global: { context: "", summary: null }, accounts: new Map() });
+
+// The agent state runs the real SQL on SQLite. resetState gives each test an empty database.
+let stateEnv = sqliteEnv().env;
+export const resetState = () => {
+  stateEnv = sqliteEnv().env;
+};
+export const readState: typeof real.readState = (_env, ...rest) => real.readState(stateEnv, ...rest);
+export const writeState: typeof real.writeState = (_env, ...rest) => real.writeState(stateEnv, ...rest);
+export const deleteState: typeof real.deleteState = (_env, ...rest) => real.deleteState(stateEnv, ...rest);

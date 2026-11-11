@@ -20,7 +20,7 @@ before(async () => {
       contents: `
         export { buildServer } from ${JSON.stringify(join(root, "src/mcp.ts"))};
         export { parseBatchResponse, batchRequestBody } from ${JSON.stringify(join(root, "src/google.ts"))};
-        export { TEST_ACCOUNT, OTHER_ACCOUNTS } from ${JSON.stringify(join(root, "test/support/db-stub.ts"))};
+        export { TEST_ACCOUNT, OTHER_ACCOUNTS, resetState } from ${JSON.stringify(join(root, "test/support/db-stub.ts"))};
         export { addressList } from ${JSON.stringify(join(root, "src/mime.ts"))};
         export { parseIcs } from ${JSON.stringify(join(root, "src/ics.ts"))};
         export { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -42,6 +42,8 @@ before(async () => {
           b.onResolve({ filter: /^\.\/db$/ }, (args) =>
             args.importer.startsWith(join(root, "src")) ? { path: join(root, "test/support/db-stub.ts") } : undefined,
           );
+          // The SQLite shim finds the migrations from its own folder, so it stays outside the bundle.
+          b.onResolve({ filter: /sqlite-env\.mjs$/ }, (args) => ({ path: join(args.resolveDir, args.path), external: true }));
         },
       },
     ],
@@ -1226,6 +1228,52 @@ describe("parseIcs", () => {
     assert.equal(e.guests.length, 50);
     assert.equal(e.more_guests, 3);
     assert.deepEqual(mod.parseIcs("Hello"), []);
+  });
+});
+
+describe("agent state", () => {
+  beforeEach(() => mod.resetState());
+
+  /** Calls a state tool, for the test account or, with account null, for the global notes. Returns its JSON result, or its error. */
+  const state = async (name, args, account = "me@example.com") => {
+    const res = await client.callTool({ name, arguments: { ...(account ? { account } : {}), ...args } });
+    return res.isError ? { isError: true, text: res.content[0].text } : JSON.parse(res.content[0].text);
+  };
+
+  test("saves, reads and deletes notes of an account, and counts calls but no changes", async () => {
+    assert.deepEqual(await state("set_state", { key: "sent/t1", value: "yes", agent_label: "Digest" }), {
+      account: "me@example.com",
+      key: "sent/t1",
+      version: 1,
+    });
+    await state("set_state", { key: "count", value: "3" });
+    const read = await state("get_state", { prefix: "sent/" });
+    assert.equal(read.notes.length, 1);
+    assert.equal(read.notes[0].value, "yes");
+    assert.equal(read.notes[0].saved_by, "Unknown app (Digest)");
+    assert.deepEqual(await state("delete_state", { keys: ["sent/t1", "count"] }), { account: "me@example.com", deleted: 2 });
+    assert.equal(calls.length, 4);
+    assert.ok(calls.every((c) => c.accountId === "acct-1" && !c.change));
+  });
+
+  test("keeps the global notes apart from the notes of an account", async () => {
+    await state("set_state", { key: "briefing/last_run", value: "2026-11-12T07:00:00Z" }, null);
+    assert.deepEqual((await state("get_state", {}, null)).notes.map((n) => n.key), ["briefing/last_run"]);
+    assert.deepEqual((await state("get_state", {})).notes, []);
+    assert.equal((await state("get_state", {}, null)).account, null);
+    // Only the call for the account counts in the usage of an account.
+    assert.deepEqual(calls, [{ accountId: "acct-1", change: false }]);
+  });
+
+  test("if_version refuses a save over a change by another agent", async () => {
+    await state("set_state", { key: "n", value: "1", if_version: 0 });
+    assert.match((await state("set_state", { key: "n", value: "x", if_version: 0 })).text, /already exists/);
+    assert.equal((await state("set_state", { key: "n", value: "2", if_version: 1 })).version, 2);
+    assert.match((await state("set_state", { key: "n", value: "x", if_version: 1 })).text, /does not have version 1/);
+  });
+
+  test("refuses an unknown account", async () => {
+    assert.match((await state("get_state", {}, "nobody@example.com")).text, /no linked mailbox "nobody@example.com"/);
   });
 });
 

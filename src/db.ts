@@ -288,6 +288,7 @@ export async function deleteAccount(env: Env, userId: string, id: string): Promi
       env.DB.prepare("DELETE FROM context_versions WHERE account_id = ?").bind(versionKey(userId, { kind: "account", accountId: id })),
       env.DB.prepare("DELETE FROM account_usage WHERE account_id = ?").bind(id),
       env.DB.prepare("DELETE FROM bulk_confirmations WHERE account_id = ?").bind(id),
+      env.DB.prepare("DELETE FROM agent_state WHERE user_id = ? AND account_id = ?").bind(userId, id),
       env.DB.prepare("DELETE FROM accounts WHERE id = ? AND user_id = ?").bind(id, userId),
     ]);
   }
@@ -737,4 +738,181 @@ export async function restoreContextVersion(
     setLiveContext(env, userId, subject, version.context, now),
   ]);
   return "restored";
+}
+
+// ---------- agent state ----------
+
+/** The owner of a set of agent notes: the global state of a user, or one account of the user. */
+export type StateScope = { kind: "global" } | { kind: "account"; accountId: string };
+
+/** The global state of the user. */
+export const GLOBAL_STATE = { kind: "global" } as const satisfies StateScope;
+
+// agent_state.account_id holds the account ID for the notes of an account, and '' for the global notes.
+const stateKey = (s: StateScope) => (s.kind === "global" ? "" : s.accountId);
+
+// The largest number of bound parameters that D1 accepts in one statement.
+const MAX_BOUND_PARAMETERS = 100;
+
+/** The largest number of notes in one scope. */
+export const MAX_STATE_NOTES = 500;
+/** The longest key of a note, in characters. */
+export const MAX_STATE_KEY_CHARS = 200;
+/** The longest value of a note, in characters. */
+export const MAX_STATE_VALUE_CHARS = 4000;
+/** The number of days that a note lasts when the agent gives no other number, and the largest number. */
+export const DEFAULT_STATE_DAYS = 90;
+export const MAX_STATE_DAYS = 365;
+
+/** A note that an agent saved. */
+export interface StateNote {
+  key: string;
+  value: string;
+  /** 1 for a new note, and 1 more at each save. */
+  version: number;
+  /** The name of the OAuth client of the agent that saved the note last. */
+  updatedBy: string;
+  /** The name that the agent gave for itself. Mailroom cannot verify it. */
+  agentLabel: string | null;
+  updatedAt: number;
+  expiresAt: number;
+}
+
+/** A change to a note. */
+export interface StateWrite {
+  key: string;
+  value: string;
+  /** The number of days until the note expires. */
+  days: number;
+  /** When given, the save happens only when the note has this version. 0 means that the note must not exist. */
+  ifVersion?: number;
+  agent: { clientName: string; label: string | null };
+}
+
+interface StateRow {
+  account_id: string;
+  key: string;
+  value: string;
+  version: number;
+  updated_by: string;
+  agent_label: string | null;
+  updated_at: number;
+  expires_at: number;
+}
+
+const toNote = (r: StateRow): StateNote => ({
+  key: r.key,
+  value: r.value,
+  version: r.version,
+  updatedBy: r.updated_by,
+  agentLabel: r.agent_label,
+  updatedAt: r.updated_at,
+  expiresAt: r.expires_at,
+});
+
+/**
+ * Returns the notes of a scope of the user that did not expire, in order of key. With `keys`, returns only
+ * the notes with those keys. With `prefix`, returns only the notes with a key that starts with it.
+ */
+export async function readState(
+  env: Env,
+  userId: string,
+  scope: StateScope,
+  filter: { keys?: string[]; prefix?: string } = {},
+): Promise<StateNote[]> {
+  const { results } = await env.DB.prepare(
+    "SELECT * FROM agent_state WHERE user_id = ? AND account_id = ? AND expires_at > ? ORDER BY key",
+  )
+    .bind(userId, stateKey(scope), Date.now())
+    .all<StateRow>();
+  const keys = filter.keys && new Set(filter.keys);
+  return results.filter((r) => (!keys || keys.has(r.key)) && r.key.startsWith(filter.prefix ?? "")).map(toNote);
+}
+
+/**
+ * Saves a note in a scope of the user, and deletes the expired notes of the user. Returns the new
+ * version of the note. Returns `conflict` when `ifVersion` is not the version of the note, and `full`
+ * when the note is new and the scope already has MAX_STATE_NOTES notes.
+ * Precondition: the key and the value are within MAX_STATE_KEY_CHARS and MAX_STATE_VALUE_CHARS, and the
+ * scope belongs to the user.
+ */
+export async function writeState(
+  env: Env,
+  userId: string,
+  scope: StateScope,
+  w: StateWrite,
+): Promise<{ version: number } | "conflict" | "full"> {
+  const now = Date.now();
+  const account = stateKey(scope);
+  const expiresAt = now + w.days * DAY_MS;
+  const [, counts] = await env.DB.batch([
+    env.DB.prepare("DELETE FROM agent_state WHERE user_id = ? AND expires_at <= ?").bind(userId, now),
+    env.DB.prepare("SELECT COUNT(*) AS notes, SUM(key = ?) AS found FROM agent_state WHERE user_id = ? AND account_id = ?").bind(
+      w.key,
+      userId,
+      account,
+    ),
+  ]);
+  const { notes, found } = firstRow<{ notes: number; found: number | null }>(counts) ?? { notes: 0, found: 0 };
+  if (!found && notes >= MAX_STATE_NOTES) return "full";
+  const by = [w.agent.clientName, w.agent.label] as const;
+  const statement =
+    w.ifVersion === undefined
+      ? env.DB.prepare(
+          `INSERT INTO agent_state (user_id, account_id, key, value, version, updated_by, agent_label, updated_at, expires_at)
+           VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)
+           ON CONFLICT(user_id, account_id, key) DO UPDATE SET
+             value = excluded.value, version = version + 1, updated_by = excluded.updated_by, agent_label = excluded.agent_label,
+             updated_at = excluded.updated_at, expires_at = excluded.expires_at
+           RETURNING version`,
+        ).bind(userId, account, w.key, w.value, ...by, now, expiresAt)
+      : w.ifVersion === 0
+        ? env.DB.prepare(
+            `INSERT INTO agent_state (user_id, account_id, key, value, version, updated_by, agent_label, updated_at, expires_at)
+             VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?) ON CONFLICT(user_id, account_id, key) DO NOTHING RETURNING version`,
+          ).bind(userId, account, w.key, w.value, ...by, now, expiresAt)
+        : env.DB.prepare(
+            `UPDATE agent_state SET value = ?, version = version + 1, updated_by = ?, agent_label = ?, updated_at = ?, expires_at = ?
+             WHERE user_id = ? AND account_id = ? AND key = ? AND version = ? RETURNING version`,
+          ).bind(w.value, ...by, now, expiresAt, userId, account, w.key, w.ifVersion);
+  const row = await statement.first<{ version: number }>();
+  return row ? { version: row.version } : "conflict";
+}
+
+/** Deletes notes of a scope of the user: the notes with the keys, or every note of the scope for `all`. Returns the number of notes that it deleted. */
+export async function deleteState(env: Env, userId: string, scope: StateScope, keys: string[] | "all"): Promise<number> {
+  const account = stateKey(scope);
+  if (keys === "all") {
+    const r = await env.DB.prepare("DELETE FROM agent_state WHERE user_id = ? AND account_id = ?").bind(userId, account).run();
+    return r.meta.changes;
+  }
+  if (!keys.length) return 0;
+  // Each statement binds the user, the account and as many keys as D1 allows with them.
+  const size = MAX_BOUND_PARAMETERS - 2;
+  const statements: D1PreparedStatement[] = [];
+  for (let i = 0; i < keys.length; i += size) {
+    const group = keys.slice(i, i + size);
+    statements.push(
+      env.DB.prepare(`DELETE FROM agent_state WHERE user_id = ? AND account_id = ? AND key IN (${group.map(() => "?").join(", ")})`).bind(
+        userId,
+        account,
+        ...group,
+      ),
+    );
+  }
+  const results = await env.DB.batch(statements);
+  return results.reduce((n, r) => n + r.meta.changes, 0);
+}
+
+/** Returns the notes of the user that did not expire: the global notes, and the notes of each account by account ID. */
+export async function allState(env: Env, userId: string): Promise<{ global: StateNote[]; accounts: Map<string, StateNote[]> }> {
+  const { results } = await env.DB.prepare("SELECT * FROM agent_state WHERE user_id = ? AND expires_at > ? ORDER BY key")
+    .bind(userId, Date.now())
+    .all<StateRow>();
+  const out = { global: [] as StateNote[], accounts: new Map<string, StateNote[]>() };
+  for (const r of results) {
+    if (r.account_id === "") out.global.push(toNote(r));
+    else out.accounts.set(r.account_id, [...(out.accounts.get(r.account_id) ?? []), toNote(r)]);
+  }
+  return out;
 }
