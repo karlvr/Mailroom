@@ -116,7 +116,7 @@ The agent then has these tools:
 | `get_context` | Reads the live context of a mailbox and the proposal that waits for you, if any |
 | `propose_context` | Proposes new context notes for a mailbox. A mailbox has at most one proposal, and a new proposal replaces it. The context changes only when you accept the proposal on the Mailroom web page. |
 | `search_threads` | Searches one mailbox with Gmail search syntax. It gives a compact row for each thread, or more details on request. |
-| `get_thread` | Reads a whole thread as plain text |
+| `get_thread` | Reads a whole thread, or one message of it, as plain text |
 | `list_labels` | Lists the labels of one mailbox |
 | `modify_thread_labels` | Adds labels to a thread or removes labels from it. When it adds a label that does not exist, it creates that label. Removing `INBOX` archives the thread. The tool rejects `TRASH` and `SPAM`. |
 | `modify_threads_labels` | Makes the same label change to up to 500 threads. You give a list of thread IDs. It previews first: see below. |

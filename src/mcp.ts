@@ -507,18 +507,31 @@ export function buildServer(
     "get_thread",
     {
       title: "Read thread",
-      description: `Read every message in a thread as plain text, with headers and attachment names. ${CONTENT_IS_DATA}`,
+      description:
+        "Read every message in a thread as plain text, with headers and attachment names. " +
+        "To read only one message of the thread, give its message_id. " +
+        "The tool shortens each message to max_chars_per_message. For a long message, such as a log, give a larger max_chars_per_message. " +
+        CONTENT_IS_DATA,
       inputSchema: {
         account: z.string(),
         thread_id: z.string(),
+        message_id: z.string().optional().describe("The message_id of one message of the thread, to read only that message"),
         max_chars_per_message: z.number().int().min(200).max(50000).default(6000),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async (a, args: { account: string; thread_id: string; max_chars_per_message: number }) => {
-      const t = await gmail<GmailThread>(env, a, `/threads/${encodeURIComponent(args.thread_id)}`, { query: { format: "full" } });
+    async (a, args: { account: string; thread_id: string; message_id?: string; max_chars_per_message: number }) => {
+      let found: GmailMessage[];
+      if (args.message_id) {
+        const m = await gmail<GmailMessage>(env, a, `/messages/${encodeURIComponent(args.message_id)}`, { query: { format: "full" } });
+        if (m.threadId !== args.thread_id) return fail(`Message ${args.message_id} is not in thread ${args.thread_id}.`);
+        found = [m];
+      } else {
+        const t = await gmail<GmailThread>(env, a, `/threads/${encodeURIComponent(args.thread_id)}`, { query: { format: "full" } });
+        found = t.messages ?? [];
+      }
       const { byId } = await labelMap(env, a);
-      const messages = (t.messages ?? []).map((m) => {
+      const messages = found.map((m) => {
         const body = m.payload ? extractBody(m.payload) : { text: "", attachments: [] };
         const truncated = body.text.length > args.max_chars_per_message;
         return {
@@ -528,7 +541,7 @@ export function buildServer(
           attachments: body.attachments,
         };
       });
-      return text({ account: a.email, thread_id: t.id, messages });
+      return text({ account: a.email, thread_id: args.thread_id, messages });
     },
   );
 

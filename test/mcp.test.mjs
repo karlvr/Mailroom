@@ -155,11 +155,16 @@ class FakeGmail {
     }
     const thread = /^\/threads\/([^/]+)$/.exec(path);
     if (thread && method === "GET") {
-      const t = this.mailThreads.get(decodeURIComponent(thread[1]));
-      return Response.json({
-        id: thread[1],
-        messages: t.map((msg, i) => ({ id: `${thread[1]}-${i}`, threadId: thread[1], labelIds: msg.labels, payload: { headers: msg.headers } })),
-      });
+      const id = decodeURIComponent(thread[1]);
+      return Response.json({ id, messages: this.mailThreads.get(id).map((_, i) => this.mailMessage(id, i)) });
+    }
+    const message = /^\/messages\/([^/]+)-(\d+)$/.exec(path);
+    if (message && method === "GET") {
+      const id = decodeURIComponent(message[1]);
+      if (!this.mailThreads.get(id)?.[Number(message[2])]) {
+        return Response.json({ error: { code: 404, message: "Requested entity was not found." } }, { status: 404 });
+      }
+      return Response.json(this.mailMessage(id, Number(message[2])));
     }
     const m = /^\/threads\/([^/]+)\/modify$/.exec(path);
     if (m && method === "POST") {
@@ -167,6 +172,13 @@ class FakeGmail {
       return Response.json(body, { status });
     }
     throw new Error(`The fake Gmail has no route for ${method} ${url.href}`);
+  }
+
+  /** Returns message `i` of a thread for send_draft and get_thread, as Gmail gives it. */
+  mailMessage(threadId, i) {
+    const msg = this.mailThreads.get(threadId)[i];
+    const body = msg.body === undefined ? {} : { mimeType: "text/plain", body: { data: Buffer.from(msg.body).toString("base64url") } };
+    return { id: `${threadId}-${i}`, threadId, labelIds: msg.labels, payload: { headers: msg.headers, ...body } };
   }
 
   /** Answers a batch request in the format of the real Gmail, with CRLF line ends. */
@@ -278,6 +290,9 @@ async function previewAndConfirm(name, args) {
 
 const failures = 'subject:"PopularityService failure"';
 const kinds = (kind) => gmail.batches.filter((b) => b.startsWith(`${kind}:`)).map((b) => Number(b.split(":")[1]));
+
+/** Returns Gmail headers from an object of names and values. */
+const headers = (o) => Object.entries(o).map(([name, value]) => ({ name, value }));
 
 describe("preview", () => {
   test("groups the threads by sender, and does not count as a change", async () => {
@@ -528,6 +543,30 @@ describe("search_threads", () => {
   });
 });
 
+describe("get_thread", () => {
+  beforeEach(() => {
+    gmail.mailThreads.set("g1", [
+      { labels: ["INBOX"], headers: headers({ From: "ana@example.com", Subject: "Logs" }), body: "first" },
+      { labels: ["INBOX"], headers: headers({ From: "ana@example.com", Subject: "Re: Logs" }), body: "x".repeat(300) },
+    ]);
+  });
+
+  test("reads every message, shortened to max_chars_per_message", async () => {
+    const r = await call("get_thread", { thread_id: "g1", max_chars_per_message: 200 });
+    assert.deepEqual(r.messages.map((m) => m.body), ["first", `${"x".repeat(200)}\n…[truncated]`]);
+  });
+
+  test("reads one message", async () => {
+    const r = await call("get_thread", { thread_id: "g1", message_id: "g1-1" });
+    assert.deepEqual(r.messages.map((m) => [m.message_id, m.body]), [["g1-1", "x".repeat(300)]]);
+  });
+
+  test("refuses a message of another thread", async () => {
+    gmail.mailThreads.set("g2", [{ labels: [], headers: [], body: "other" }]);
+    assert.match((await call("get_thread", { thread_id: "g1", message_id: "g2-0" })).text, /not in thread g1/);
+  });
+});
+
 describe("modify_thread_labels", () => {
   test("still changes one thread", async () => {
     const r = await call("modify_thread_labels", { thread_id: "t5", add: ["Existing"], remove: ["INBOX"] });
@@ -536,9 +575,6 @@ describe("modify_thread_labels", () => {
     assert.deepEqual(gmail.batches, []);
   });
 });
-
-/** Returns Gmail headers from an object of names and values. */
-const headers = (o) => Object.entries(o).map(([name, value]) => ({ name, value }));
 
 describe("send_draft", () => {
   /** Sets the two send permissions of the test mailbox. */
