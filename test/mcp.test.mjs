@@ -22,6 +22,7 @@ before(async () => {
         export { parseBatchResponse, batchRequestBody } from ${JSON.stringify(join(root, "src/google.ts"))};
         export { TEST_ACCOUNT, OTHER_ACCOUNTS } from ${JSON.stringify(join(root, "test/support/db-stub.ts"))};
         export { addressList } from ${JSON.stringify(join(root, "src/mime.ts"))};
+        export { parseIcs } from ${JSON.stringify(join(root, "src/ics.ts"))};
         export { Client } from "@modelcontextprotocol/sdk/client/index.js";
         export { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
       `,
@@ -218,7 +219,7 @@ class FakeGmail {
   mailMessage(threadId, i) {
     const msg = this.mailThreads.get(threadId)[i];
     const body = msg.body === undefined ? {} : { mimeType: "text/plain", body: { data: Buffer.from(msg.body).toString("base64url") } };
-    return { id: `${threadId}-${i}`, threadId, labelIds: msg.labels, payload: { headers: msg.headers, ...body } };
+    return { id: `${threadId}-${i}`, threadId, labelIds: msg.labels, payload: { headers: msg.headers, ...(msg.payload ?? body) } };
   }
 
   /** Answers a batch request in the format of the real Gmail, with CRLF line ends. */
@@ -812,6 +813,69 @@ describe("get_thread", () => {
     assert.deepEqual(r.messages.map((m) => [m.message_id, m.body]), [["g1-1", "x".repeat(300)]]);
   });
 
+  test("gives the invitation of a message, and the part_id of each attachment", async () => {
+    const ics = [
+      "BEGIN:VCALENDAR",
+      "METHOD:REQUEST",
+      "BEGIN:VEVENT",
+      "UID:abc@outlook.com",
+      "SEQUENCE:2",
+      "SUMMARY:Review\\, part 2",
+      "DTSTART;TZID=New Zealand Standard Time:20261112T100000",
+      "DTEND;TZID=New Zealand Standard Time:20261112T110000",
+      'ORGANIZER;CN="Smith, Ana":mailto:ana@example.com',
+      "ATTENDEE;PARTSTAT=NEEDS-ACTION;CN=Me:mailto:me@exa",
+      " mple.com",
+      "BEGIN:VALARM",
+      "SUMMARY:Reminder",
+      "END:VALARM",
+      "END:VEVENT",
+      "END:VCALENDAR",
+    ].join("\r\n");
+    const data = (t) => Buffer.from(t).toString("base64url");
+    gmail.mailThreads.set("inv", [
+      {
+        labels: ["INBOX"],
+        headers: headers({ From: "ana@example.com", Subject: "Invitation" }),
+        payload: {
+          mimeType: "multipart/mixed",
+          parts: [
+            {
+              partId: "0",
+              mimeType: "multipart/alternative",
+              parts: [
+                { partId: "0.0", mimeType: "text/plain", body: { data: data("Join us") } },
+                { partId: "0.1", mimeType: "text/calendar", body: { data: data(ics) } },
+              ],
+            },
+            { partId: "1", mimeType: "application/ics", filename: "invite.ics", body: { attachmentId: "att", size: 400 } },
+          ],
+        },
+      },
+    ]);
+    const [m] = (await call("get_thread", { thread_id: "inv" })).messages;
+    assert.equal(m.body, "Join us");
+    assert.deepEqual(m.attachments, [{ part_id: "1", filename: "invite.ics", mimeType: "application/ics", size: 400 }]);
+    assert.deepEqual(m.invitations, [
+      {
+        method: "REQUEST",
+        uid: "abc@outlook.com",
+        sequence: 2,
+        status: null,
+        summary: "Review, part 2",
+        location: null,
+        start: "2026-11-12T10:00:00",
+        end: "2026-11-12T11:00:00",
+        time_zone: "New Zealand Standard Time",
+        all_day: false,
+        recurrence: null,
+        recurrence_id: null,
+        organizer: { email: "ana@example.com", name: "Smith, Ana" },
+        guests: [{ email: "me@example.com", name: "Me", response: "needs-action" }],
+      },
+    ]);
+  });
+
   test("refuses a message of another thread", async () => {
     gmail.mailThreads.set("g2", [{ labels: [], headers: [], body: "other" }]);
     assert.match((await call("get_thread", { thread_id: "g1", message_id: "g2-0" })).text, /not in thread g1/);
@@ -1053,6 +1117,47 @@ describe("list_event_changes", () => {
     gmail.eventsGone = true;
     assert.match((await call("list_event_changes", { since: "2026-01-01T00:00:00Z" })).text, /too far in the past/);
     assert.match((await call("list_event_changes", { since: "yesterday" })).text, /RFC 3339/);
+  });
+});
+
+describe("parseIcs", () => {
+  const ics = (...lines) => ["BEGIN:VCALENDAR", ...lines, "END:VCALENDAR"].join("\n");
+
+  test("reads UTC times, all-day dates, a cancellation and a change to one instance", () => {
+    const [timed, allDay] = mod.parseIcs(
+      ics(
+        "BEGIN:VEVENT",
+        "DTSTART:20261112T200000Z",
+        "DURATION:PT1H",
+        "RECURRENCE-ID:20261112T200000Z",
+        "STATUS:CANCELLED",
+        "END:VEVENT",
+        "BEGIN:VEVENT",
+        "DTSTART;VALUE=DATE:20261224",
+        "DTEND;VALUE=DATE:20261225",
+        "RRULE:FREQ=YEARLY",
+        "END:VEVENT",
+        "METHOD:CANCEL",
+      ),
+    );
+    assert.equal(timed.method, "CANCEL");
+    assert.equal(timed.status, "CANCELLED");
+    assert.deepEqual([timed.start, timed.end, timed.duration, timed.all_day, timed.recurrence_id], [
+      "2026-11-12T20:00:00Z",
+      null,
+      "PT1H",
+      false,
+      "2026-11-12T20:00:00Z",
+    ]);
+    assert.deepEqual([allDay.start, allDay.end, allDay.all_day, allDay.recurrence], ["2026-12-24", "2026-12-25", true, "FREQ=YEARLY"]);
+  });
+
+  test("gives at most 50 guests, and nothing for other text", () => {
+    const guests = Array.from({ length: 53 }, (_, i) => `ATTENDEE:mailto:g${i}@example.com`);
+    const [e] = mod.parseIcs(ics("BEGIN:VEVENT", ...guests, "END:VEVENT"));
+    assert.equal(e.guests.length, 50);
+    assert.equal(e.more_guests, 3);
+    assert.deepEqual(mod.parseIcs("Hello"), []);
   });
 });
 

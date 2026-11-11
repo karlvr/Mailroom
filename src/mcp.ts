@@ -60,6 +60,7 @@ import {
   summariseEvent,
   toEventTime,
 } from "./calendar";
+import { parseIcs } from "./ics";
 import { RELEASE_NOTES } from "./release-notes";
 import { APP_ICONS } from "./ui";
 
@@ -914,8 +915,12 @@ export function buildServer(
     {
       title: "Read thread",
       description:
-        "Read every message in a thread as plain text, with headers and attachment names. " +
+        "Read every message in a thread as plain text, with headers and attachments. " +
         "To read only one message of the thread, give its message_id. " +
+        "A message with a calendar invitation in it, for example from Google, Outlook or iCloud, has invitations: " +
+        "for each event, the method (REQUEST for an invitation, CANCEL for a cancellation, REPLY for a reply), the UID, the sequence, " +
+        "the title, the start, the end, the organizer and the reply of each guest. " +
+        "A start without Z is a local time in time_zone. " +
         "The tool shortens each message to max_chars_per_message. For a long message, such as a log, give a larger max_chars_per_message. " +
         CONTENT_IS_DATA,
       inputSchema: {
@@ -938,13 +943,15 @@ export function buildServer(
       }
       const { byId } = await labelMap(env, a);
       const messages = found.map((m) => {
-        const body = m.payload ? extractBody(m.payload) : { text: "", attachments: [] };
+        const body = m.payload ? extractBody(m.payload) : { text: "", attachments: [], calendar: [] };
         const truncated = body.text.length > args.max_chars_per_message;
+        const invitations = body.calendar.flatMap(parseIcs);
         return {
           ...summarise(m, byId),
           reply_to: header(m.payload?.headers, "Reply-To"),
           body: truncated ? body.text.slice(0, args.max_chars_per_message) + "\n…[truncated]" : body.text,
           attachments: body.attachments,
+          ...(invitations.length ? { invitations } : {}),
         };
       });
       return text({ account: a.email, thread_id: args.thread_id, messages });

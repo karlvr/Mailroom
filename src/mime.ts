@@ -21,7 +21,15 @@ export function header(headers: GmailHeader[] | undefined, name: string): string
 
 const decodeData = (data: string) => new TextDecoder().decode(fromB64url(data));
 
-function walk(part: GmailPart, out: { plain: string[]; html: string[]; attachments: GmailPart[] }) {
+/** The parts of a message by kind. `calendar` has the text of each calendar part that is not an attachment, such as an invitation. */
+interface MessageParts {
+  plain: string[];
+  html: string[];
+  calendar: string[];
+  attachments: GmailPart[];
+}
+
+function walk(part: GmailPart, out: MessageParts) {
   const type = (part.mimeType ?? "").toLowerCase();
   if (part.filename && (part.body?.attachmentId || part.body?.size)) {
     out.attachments.push(part);
@@ -34,6 +42,7 @@ function walk(part: GmailPart, out: { plain: string[]; html: string[]; attachmen
   if (!part.body?.data) return;
   if (type === "text/plain") out.plain.push(decodeData(part.body.data));
   else if (type === "text/html") out.html.push(decodeData(part.body.data));
+  else if (type === "text/calendar") out.calendar.push(decodeData(part.body.data));
 }
 
 /**
@@ -73,17 +82,27 @@ export function htmlToText(html: string): string {
 }
 
 function collect(payload: GmailPart) {
-  const out = { plain: [] as string[], html: [] as string[], attachments: [] as GmailPart[] };
+  const out: MessageParts = { plain: [], html: [], calendar: [], attachments: [] };
   walk(payload, out);
   return out;
 }
 
+/**
+ * Returns the plain text of a message, its attachments, and the text of each calendar part that is not
+ * an attachment. `part_id` of an attachment addresses the part in the message.
+ */
 export function extractBody(payload: GmailPart) {
   const out = collect(payload);
   const text = out.plain.length ? out.plain.join("\n\n") : htmlToText(out.html.join("\n\n"));
   return {
     text: text.replace(/\r\n/g, "\n").trim(),
-    attachments: out.attachments.map((p) => ({ filename: p.filename ?? "", mimeType: p.mimeType ?? "", size: p.body?.size ?? 0 })),
+    attachments: out.attachments.map((p) => ({
+      part_id: p.partId ?? null,
+      filename: p.filename ?? "",
+      mimeType: p.mimeType ?? "",
+      size: p.body?.size ?? 0,
+    })),
+    calendar: out.calendar,
   };
 }
 

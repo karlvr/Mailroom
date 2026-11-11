@@ -17,6 +17,7 @@ export const RELEASE_NOTES: ReleaseDay[] = [
   {
     date: "2026-11-12",
     changes: [
+      "An agent can read the details of an invitation in an email, from Google, Outlook or iCloud: the time, the organizer and who accepted.",
       "An agent can find the calendar events that are new, moved or cancelled since it last checked, also invitations from Outlook and iCloud that Google Calendar added.",
       "An agent can delete drafts. It still cannot delete email that you received or sent.",
       "An agent can find and edit drafts, so a change to a reply no longer leaves an old copy behind.",

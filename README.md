@@ -119,7 +119,7 @@ The agent then has these tools:
 | `summarise_threads` | Counts the threads that match a Gmail search, and the unread ones. It can group them by sender, domain, mailing list or subject. |
 | `search_all_accounts` | Searches every mailbox with the same Gmail search, and gives the newest threads of all the mailboxes in one list |
 | `summarise_all_accounts` | Gives the summary of `summarise_threads` for every mailbox, and the sum of the counts |
-| `get_thread` | Reads a whole thread, or one message of it, as plain text |
+| `get_thread` | Reads a whole thread, or one message of it, as plain text. It also gives the details of each calendar invitation in a message. |
 | `list_labels` | Lists the labels of one mailbox |
 | `modify_thread_labels` | Adds labels to a thread or removes labels from it. When it adds a label that does not exist, it creates that label. Removing `INBOX` archives the thread. The tool rejects `TRASH` and `SPAM`. |
 | `modify_threads_labels` | Makes the same label change to up to 500 threads. You give a list of thread IDs. It previews first: see below. |
