@@ -72,6 +72,8 @@ class FakeGmail {
     this.mailThreads = new Map();
     /** The IDs of the drafts that Gmail sent. */
     this.sent = [];
+    /** The drafts that the upload API replaced: the ID, the metadata and the message of each. */
+    this.uploads = [];
     /** The number of requests that the fake got, as Workers counts subrequests. */
     this.requests = 0;
     this.tokenRequests = 0;
@@ -150,11 +152,19 @@ class FakeGmail {
       const next = start + size < all.length ? String(start + size) : undefined;
       return Response.json({ threads: page.map((id) => ({ id })), ...(next ? { nextPageToken: next } : {}) });
     }
+    if (path === "/drafts" && method === "GET") return Response.json({ drafts: [...this.drafts.keys()].map((id) => ({ id })) });
     const draft = /^\/drafts\/([^/]+)$/.exec(path);
     if (draft && method === "GET") {
-      const d = this.drafts.get(decodeURIComponent(draft[1]));
-      if (!d) return Response.json({ error: { code: 404, message: "Requested entity was not found." } }, { status: 404 });
-      return Response.json({ id: draft[1], message: { id: `${draft[1]}-m`, threadId: d.threadId, labelIds: ["DRAFT"], payload: { headers: d.headers } } });
+      const [status, body] = this.draft(decodeURIComponent(draft[1]));
+      return Response.json(body, { status });
+    }
+    const upload = /^\/upload\/drafts\/([^/]+)$/.exec(path);
+    if (upload && method === "PUT") {
+      const id = decodeURIComponent(upload[1]);
+      const boundary = /boundary=(\S+)/.exec(new Headers(init.headers).get("Content-Type"))[1];
+      const [metadata, message] = init.body.split(`--${boundary}`).slice(1, 3).map((p) => p.slice(p.indexOf("\r\n\r\n") + 4).replace(/\r\n$/, ""));
+      this.uploads.push({ id, metadata: JSON.parse(metadata), message });
+      return Response.json({ id, message: { id: `${id}-m2`, threadId: this.drafts.get(id).threadId } });
     }
     if (path === "/drafts/send" && method === "POST") {
       const { id } = JSON.parse(init.body);
@@ -180,6 +190,14 @@ class FakeGmail {
       return Response.json(body, { status });
     }
     throw new Error(`The fake Gmail has no route for ${method} ${url.href}`);
+  }
+
+  /** Returns the status and the JSON of a draft, as Gmail gives it. */
+  draft(id) {
+    const d = this.drafts.get(id);
+    if (!d) return [404, { error: { code: 404, message: "Requested entity was not found." } }];
+    const body = d.body === undefined ? {} : { mimeType: "text/plain", body: { data: Buffer.from(d.body).toString("base64url") } };
+    return [200, { id, message: { id: `${id}-m`, threadId: d.threadId, labelIds: ["DRAFT"], snippet: d.body, payload: { headers: d.headers, ...body } } }];
   }
 
   /** Returns message `i` of a thread for send_draft and get_thread, as Gmail gives it. */
@@ -213,9 +231,12 @@ class FakeGmail {
         [status, body] = [401, { error: { code: 401, message: "Request had invalid authentication credentials." } }];
       } else {
         const read = /^\/gmail\/v1\/users\/me\/threads\/([^/?]+)\?format=metadata&/.exec(c.path);
+        const draft = /^\/gmail\/v1\/users\/me\/drafts\/([^/?]+)\?format=metadata$/.exec(c.path);
         const m = /^\/gmail\/v1\/users\/me\/threads\/([^/]+)\/(modify|trash)$/.exec(c.path);
         if (read && c.method === "GET") {
           [status, body] = this.read(decodeURIComponent(read[1]));
+        } else if (draft && c.method === "GET") {
+          [status, body] = this.draft(decodeURIComponent(draft[1]));
         } else {
           assert.ok(m && c.method === "POST", `unexpected batch call ${c.method} ${c.path}`);
           const id = decodeURIComponent(m[1]);
@@ -888,6 +909,75 @@ describe("send_draft", () => {
     assert.deepEqual(await permissions(), { can_send: true, can_reply: true });
     allow(false, false);
     assert.deepEqual(await permissions(), { can_send: false, can_reply: false });
+  });
+});
+
+describe("drafts", () => {
+  beforeEach(() => {
+    gmail.drafts.set("d1", {
+      threadId: "r1",
+      headers: headers({
+        From: "Me at work <me@work.example.com>",
+        To: "Ana <ana@example.com>",
+        Cc: "bob@example.com",
+        Subject: "Re: Plans",
+        "In-Reply-To": "<orig@example.com>",
+        References: "<orig@example.com>",
+      }),
+      body: "Old text",
+    });
+    gmail.drafts.set("d2", { threadId: "r2", headers: headers({ To: "carol@example.com", Subject: "Invoice" }), body: "Hello" });
+  });
+
+  /** Returns the headers and the decoded body of the message that the upload API got. */
+  const uploaded = () => {
+    const [{ message }] = gmail.uploads;
+    const [head, ...rest] = message.split("\r\n\r\n");
+    const fields = Object.fromEntries(head.split("\r\n").map((l) => [l.slice(0, l.indexOf(":")), l.slice(l.indexOf(":") + 2)]));
+    return { fields, body: Buffer.from(rest.join("").replace(/\r\n/g, ""), "base64").toString() };
+  };
+
+  test("list_drafts gives the recipients, subject and snippet of each draft", async () => {
+    const r = await call("list_drafts", {});
+    assert.deepEqual(r.drafts, [
+      { draft_id: "d1", thread_id: "r1", to: "Ana <ana@example.com>", cc: "bob@example.com", subject: "Re: Plans", date: null, snippet: "Old text" },
+      { draft_id: "d2", thread_id: "r2", to: "carol@example.com", cc: null, subject: "Invoice", date: null, snippet: "Hello" },
+    ]);
+    assert.deepEqual(kinds("read"), [2]);
+  });
+
+  test("update_draft changes the body, and keeps the sender, the recipients and the reply headers", async () => {
+    const r = await call("update_draft", { draft_id: "d1", body: "New text" });
+    assert.equal(r.draft_id, "d1");
+    assert.deepEqual(gmail.uploads[0].metadata, { id: "d1", message: { threadId: "r1" } });
+    const { fields, body } = uploaded();
+    assert.equal(body, "New text");
+    assert.equal(fields.From, "Me at work <me@work.example.com>");
+    assert.equal(fields.To, "Ana <ana@example.com>");
+    assert.equal(fields.Cc, "bob@example.com");
+    assert.equal(fields.Subject, "Re: Plans");
+    assert.equal(fields["In-Reply-To"], "<orig@example.com>");
+    assert.equal(fields.References, "<orig@example.com>");
+  });
+
+  test("update_draft changes the recipients, removes Cc, and keeps the body", async () => {
+    await call("update_draft", { draft_id: "d1", to: "dan@example.com", cc: "" });
+    const { fields, body } = uploaded();
+    assert.equal(fields.To, "dan@example.com");
+    assert.equal(fields.Cc, undefined);
+    assert.equal(body, "Old text");
+  });
+
+  test("update_draft gives no sender for a draft without one, so that Gmail uses the default address", async () => {
+    await call("update_draft", { draft_id: "d2", subject: "Invoice 42" });
+    const { fields } = uploaded();
+    assert.equal(fields.From, undefined);
+    assert.equal(fields.Subject, "Invoice 42");
+  });
+
+  test("update_draft needs a change", async () => {
+    assert.match((await call("update_draft", { draft_id: "d1" })).text, /at least one field/);
+    assert.deepEqual(gmail.uploads, []);
   });
 });
 

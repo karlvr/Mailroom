@@ -360,9 +360,15 @@ export const calendar = <T>(env: Env, account: Account, path: string, init: ApiR
 /**
  * Upload a whole RFC 822 message with its JSON metadata to the Gmail upload API, for one linked account.
  * Use this for a message that can be too large for the `raw` field of a JSON request.
- * `path` is relative to /upload/gmail/v1/users/me, for example `/drafts`.
+ * `path` is relative to /upload/gmail/v1/users/me, for example `/drafts`. The method is POST unless
+ * `upload.method` gives another, for example PUT to replace a draft.
  */
-export function gmailUpload<T>(env: Env, account: Account, path: string, upload: { metadata: unknown; message: string }): Promise<T> {
+export function gmailUpload<T>(
+  env: Env,
+  account: Account,
+  path: string,
+  upload: { method?: string; metadata: unknown; message: string },
+): Promise<T> {
   const boundary = `mailroom-${randomToken(12)}`;
   const data = [
     `--${boundary}`,
@@ -376,7 +382,7 @@ export function gmailUpload<T>(env: Env, account: Account, path: string, upload:
     `--${boundary}--`,
   ].join("\r\n");
   return googleApi<T>(env, account, GMAIL_UPLOAD_API, path, {
-    method: "POST",
+    method: upload.method ?? "POST",
     query: { uploadType: "multipart" },
     media: { contentType: `multipart/related; boundary=${boundary}`, data },
   });

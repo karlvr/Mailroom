@@ -126,6 +126,8 @@ The agent then has these tools:
 | `modify_labels_by_query` | Makes the same label change to each thread that matches a Gmail search, up to 500 threads. It previews first: see below. |
 | `create_draft` | Saves a new draft or a threaded reply. It does not send the draft. |
 | `create_forward_draft` | Saves a draft that forwards one message, with its attachments. It does not send the draft. |
+| `list_drafts` | Lists the drafts of one mailbox, with the recipients, subject and snippet of each |
+| `update_draft` | Changes the body, recipients or subject of a draft. It keeps the thread and the attachments, and it does not send the draft. |
 | `send_draft` | Sends a draft. It works for a mailbox where you selected **Allow sending email**. With only **Allow replies**, it sends only a reply to the people of the message that the reply answers. |
 | `trash_thread` | Moves a thread to the trash. Gmail keeps trashed threads for 30 days. |
 | `trash_threads` | Moves up to 500 threads to the trash. You give a list of thread IDs. It previews first: see below. |

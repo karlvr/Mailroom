@@ -151,6 +151,8 @@ export interface MimeAttachment {
 
 /** A new plain-text message, with optional attachments. */
 export interface NewMessage {
+  /** The sender, for example a send-as address of the account. Without it, Gmail uses the default address of the account. */
+  from?: string;
   to: string;
   cc?: string;
   bcc?: string;
@@ -166,7 +168,8 @@ const quoted = (v: string) => `"${encodeHeader(clean(v).replace(/["\\]/g, ""))}"
 
 /** Returns the message as RFC 822 text with CRLF line ends. The text is ASCII only. */
 export function buildMessage(m: NewMessage): string {
-  const lines = [`To: ${clean(m.to)}`];
+  const lines = m.from ? [`From: ${clean(m.from)}`] : [];
+  lines.push(`To: ${clean(m.to)}`);
   if (m.cc) lines.push(`Cc: ${clean(m.cc)}`);
   if (m.bcc) lines.push(`Bcc: ${clean(m.bcc)}`);
   lines.push(`Subject: ${encodeHeader(clean(m.subject))}`);
