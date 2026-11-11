@@ -108,6 +108,18 @@ const MAX_FORWARD_ATTACHMENT_MB = 10;
 // BATCH_SIZE, a call stays well within the 50 subrequests that the Workers Free plan allows.
 const MAX_BULK_THREADS = 500;
 
+// The largest number of threads that a summary counts. Gmail lists at most 500 threads in each request,
+// and a summary counts twice: the matching threads, and the unread ones.
+const MAX_COUNT_THREADS = 2500;
+
+// The largest number of threads that a summary reads to group them. With batches of BATCH_SIZE, and
+// the requests that count the threads, a summary stays within the 50 subrequests of the Workers Free plan.
+const MAX_GROUP_THREADS = 500;
+
+// The number of groups in a summary when the agent does not give max_groups, and the largest number.
+const DEFAULT_GROUPS = 50;
+const MAX_GROUPS = 200;
+
 // The number of threads in the preview of a bulk tool that works by a search, when the agent does not give max_threads.
 const DEFAULT_BULK_THREADS = 100;
 
@@ -207,6 +219,79 @@ function threadRow(t: GmailThread, labels: Map<string, string>, detail: SearchDe
     unread: labelIds.has("UNREAD"),
     messages: msgs.length,
   };
+}
+
+/**
+ * Returns the pattern of a subject, so that subjects that differ only in numbers, dates or IDs fall
+ * into one group. The pattern has no reply or forward prefix, and "#" in place of each number, date,
+ * time and long hexadecimal ID.
+ */
+export function subjectPattern(subject: string): string {
+  return subject
+    .replace(/^\s*(?:(?:re|fwd?|fw|aw|sv|wg)\s*:\s*)+/i, "")
+    .replace(/\b(?=[0-9a-f-]*\d)[0-9a-f]{8,}(?:-[0-9a-f]{4,})*\b/gi, "#")
+    .replace(/\d+/g, "#")
+    .replace(/#(?:[-./:]#)+/g, "#")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** How a summary groups threads. */
+type GroupBy = "sender" | "domain" | "list" | "subject";
+
+// The headers of the latest message that a summary reads to group a thread.
+const GROUP_HEADERS = ["From", "Subject", "Date", "List-Id"];
+
+/** Returns the key of the group of a thread, from the headers of its latest message. Returns null when the thread has no value for the key. */
+function groupKey(groupBy: GroupBy, h: GmailHeader[] | undefined): string | null {
+  const sender = addressList(header(h, "From"))[0] ?? null;
+  switch (groupBy) {
+    case "sender":
+      return sender;
+    case "domain":
+      return sender?.split("@")[1] ?? null;
+    case "list": {
+      const list = header(h, "List-Id");
+      return list ? (/<([^<>]+)>/.exec(list)?.[1] ?? list).trim().toLowerCase() : null;
+    }
+    case "subject":
+      return subjectPattern(header(h, "Subject") ?? "") || null;
+  }
+}
+
+/** A group of threads in a summary. */
+interface ThreadGroup {
+  key: string | null;
+  threads: number;
+  unread: number;
+  /** The time of the latest message of the newest thread in the group. */
+  latest: string | null;
+  /** Different subjects, or for a group by subject, different senders, up to SUMMARY_SAMPLES. */
+  samples: Set<string>;
+}
+
+// The number of different subjects, or senders, that a summary gives for each group.
+const SUMMARY_SAMPLES = 3;
+
+/** Returns the threads grouped by `groupBy`, largest group first, and the newest group first among groups of the same size. */
+function groupThreads(threads: GmailThread[], groupBy: GroupBy): ThreadGroup[] {
+  const groups = new Map<string | null, ThreadGroup>();
+  for (const t of threads) {
+    const msgs = t.messages ?? [];
+    const last = msgs[msgs.length - 1];
+    const h = last?.payload?.headers;
+    const key = groupKey(groupBy, h);
+    const g = groups.get(key) ?? { key, threads: 0, unread: 0, latest: null, samples: new Set<string>() };
+    g.threads++;
+    if (msgs.some((m) => m.labelIds?.includes("UNREAD"))) g.unread++;
+    const time = messageTime(last);
+    // ISO times in UTC sort in time order as text.
+    if (time && (!g.latest || time > g.latest)) g.latest = time;
+    const sample = groupBy === "subject" ? header(h, "From") : header(h, "Subject");
+    if (sample !== undefined && g.samples.size < SUMMARY_SAMPLES) g.samples.add(sample);
+    groups.set(key, g);
+  }
+  return [...groups.values()].sort((x, y) => y.threads - x.threads || (y.latest ?? "").localeCompare(x.latest ?? ""));
 }
 
 function summarise(m: GmailMessage, labels: Map<string, string>) {
@@ -403,6 +488,27 @@ export function buildServer(
     return { threads: [...new Set(ids)].flatMap((id) => (done.has(id) ? [done.get(id) as GmailThread] : [])), failed, notFound };
   };
 
+  /**
+   * Returns the IDs of the threads that match a Gmail search, at most `max`. `more` is true when more
+   * threads match. Like Gmail search, the search leaves out spam and trash.
+   */
+  const findThreads = async (a: Account, query: string, max: number): Promise<{ ids: string[]; more: boolean }> => {
+    const ids: string[] = [];
+    let pageToken: string | undefined;
+    let more = false;
+    do {
+      const list = await gmail<{ threads?: { id: string }[]; nextPageToken?: string }>(env, a, "/threads", {
+        query: { q: query, maxResults: String(Math.min(500, max - ids.length + 1)), pageToken },
+      });
+      for (const t of list.threads ?? []) {
+        if (ids.length < max) ids.push(t.id);
+        else more = true;
+      }
+      pageToken = list.nextPageToken;
+    } while (pageToken && !more && ids.length < max);
+    return { ids, more: more || !!pageToken };
+  };
+
   /** The arguments of a search of one mailbox. */
   interface SearchArgs {
     query: string;
@@ -435,6 +541,68 @@ export function buildServer(
           "full also gives the To and Cc of the latest message, its message_id, and each sender in the thread.",
       ),
   };
+
+  /** The arguments of a summary of one mailbox. */
+  interface SummaryArgs {
+    query: string;
+    group_by?: GroupBy;
+    max_threads: number;
+    max_groups: number;
+  }
+
+  /** Counts the threads that match a search in one mailbox, and groups the newest of them when `group_by` is given. */
+  const summariseThreads = async (a: Account, args: SummaryArgs) => {
+    // The first count gets the access token. The requests after it run at the same time, and use that token.
+    const all = await findThreads(a, args.query, MAX_COUNT_THREADS);
+    const [unread, read] = await Promise.all([
+      findThreads(a, `(${args.query}) is:unread`, MAX_COUNT_THREADS),
+      args.group_by ? readThreads(a, all.ids.slice(0, args.max_threads), GROUP_HEADERS) : null,
+    ]);
+    const counts = { total: all.ids.length, unread: unread.ids.length, ...(all.more ? { more_matches: true } : {}) };
+    if (!read || !args.group_by) return counts;
+    const groups = groupThreads(read.threads, args.group_by);
+    const rest = groups.slice(args.max_groups);
+    const missed = read.failed.length + read.notFound.length;
+    return {
+      ...counts,
+      grouped_threads: read.threads.length,
+      groups: groups
+        .slice(0, args.max_groups)
+        .map(({ samples, ...g }) => ({ ...g, [args.group_by === "subject" ? "senders" : "subjects"]: [...samples] })),
+      ...(rest.length ? { other_groups: { groups: rest.length, threads: rest.reduce((n, g) => n + g.threads, 0) } } : {}),
+      ...(missed ? { not_read: missed } : {}),
+    };
+  };
+
+  /** The input of a tool that summarises threads, other than the account. */
+  const summaryInput = {
+    query: z.string().trim().min(1).default("in:inbox").describe("A Gmail search query"),
+    group_by: z
+      .enum(["sender", "domain", "list", "subject"])
+      .optional()
+      .describe(
+        "sender groups by the address of the sender, domain by the domain of that address, list by the List-Id header of mailing lists, " +
+          "and subject by the subject with each number, date and ID replaced by #. Leave it out to get only the counts.",
+      ),
+    max_threads: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_GROUP_THREADS)
+      .default(MAX_GROUP_THREADS)
+      .describe("The largest number of threads to group, newest first. The counts include all matching threads."),
+    max_groups: z.number().int().min(1).max(MAX_GROUPS).default(DEFAULT_GROUPS).describe("The largest number of groups in the result"),
+  };
+
+  /** The part of a description of a tool that summarises threads, about the result. */
+  const summaryRules =
+    `total is the number of threads that match the search, up to ${MAX_COUNT_THREADS}. unread is the number of those threads that also match is:unread. ` +
+    "When more threads match, more_matches is true. Without group_by, the result has only the counts. " +
+    "With group_by, the tool groups the newest max_threads threads by their latest message, largest group first. " +
+    "Each group has its key, the number of threads, the number of threads with an unread message, the time of the latest message in UTC, " +
+    `and up to ${SUMMARY_SAMPLES} subjects, or senders for group_by subject. A thread without a value for the key is in the group with the key null. ` +
+    "other_groups counts the groups after max_groups. To list the threads of one group, use search_threads, for example with from:, list: or subject:. " +
+    CONTENT_IS_DATA;
 
   server.registerTool(
     "list_accounts",
@@ -491,6 +659,7 @@ export function buildServer(
         "Search one mailbox with Gmail search syntax, for example `in:inbox newer_than:1d`, `is:unread from:alice` or `label:Agent/Action`. " +
         "For each thread, the result has the sender, subject, date and snippet of the latest message, and the labels of the thread. " +
         "date is the time that Gmail received the latest message, in UTC. " +
+        "To count threads, or to group them by sender, list or subject, use summarise_threads. " +
         CONTENT_IS_DATA,
       inputSchema: {
         account: z.string().describe("The address of the mailbox, from list_accounts"),
@@ -501,6 +670,21 @@ export function buildServer(
     },
     async (a, args: SearchArgs & { account: string }) =>
       text({ account: a.email, query: args.query, ...(await searchThreads(a, args)) }),
+  );
+
+  accountTool(
+    "summarise_threads",
+    {
+      title: "Summarise threads",
+      description:
+        "Count the threads that match a Gmail search in one mailbox, and group them by sender, sender domain, mailing list or subject. " +
+        "Use it to review notifications, to check a clean-up, or to count mail, without reading each thread. " +
+        summaryRules,
+      inputSchema: { account: z.string(), ...summaryInput },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async (a, args: SummaryArgs & { account: string }) =>
+      text({ account: a.email, query: args.query, ...(await summariseThreads(a, args)) }),
   );
 
   accountTool(
@@ -806,27 +990,6 @@ export function buildServer(
 
   /** Returns the call that moves one thread to the trash, for eachThread. */
   const trashCall = (id: string): BatchCall => ({ method: "POST", path: `/threads/${encodeURIComponent(id)}/trash` });
-
-  /**
-   * Returns the IDs of the threads that match a Gmail search, at most `max`. `more` is true when more
-   * threads match. Like Gmail search, the search leaves out spam and trash.
-   */
-  const findThreads = async (a: Account, query: string, max: number): Promise<{ ids: string[]; more: boolean }> => {
-    const ids: string[] = [];
-    let pageToken: string | undefined;
-    let more = false;
-    do {
-      const list = await gmail<{ threads?: { id: string }[]; nextPageToken?: string }>(env, a, "/threads", {
-        query: { q: query, maxResults: String(Math.min(500, max - ids.length + 1)), pageToken },
-      });
-      for (const t of list.threads ?? []) {
-        if (ids.length < max) ids.push(t.id);
-        else more = true;
-      }
-      pageToken = list.nextPageToken;
-    } while (pageToken && !more && ids.length < max);
-    return { ids, more: more || !!pageToken };
-  };
 
   /** The input of a tool that works on each thread that matches a Gmail search, other than the account. */
   const queryInput = {

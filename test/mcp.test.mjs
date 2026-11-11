@@ -74,7 +74,8 @@ class FakeGmail {
     this.sent = [];
     this.tokenRequests = 0;
     this.tokens = 0;
-    this.validToken = null;
+    /** The access tokens that this fake issued. Like Google, it accepts each of them. */
+    this.issued = new Set();
     /** Thread IDs whose next modify gets 429 once. */
     this.rateLimitOnce = new Set();
     /** When true, the next batch rejects the token of every call, as Gmail does for an expired token. */
@@ -82,6 +83,8 @@ class FakeGmail {
   }
 
   matches(q) {
+    const unread = /^\((.*)\) is:unread$/.exec(q);
+    if (unread) return this.matches(unread[1]).filter((id) => this.threads.get(id).labels.has("UNREAD"));
     const m = /^subject:"(.+)"$/.exec(q);
     // Like Gmail search, the fake leaves out trashed threads.
     return [...this.threads].filter(([, t]) => !t.trashed && (m ? t.subject === m[1] : true)).map(([id]) => id);
@@ -103,6 +106,7 @@ class FakeGmail {
       { name: "From", value: t.from ?? "Monitor <monitor@example.com>" },
       { name: "Subject", value: t.subject },
       { name: "Date", value: t.date ?? "Tue, 10 Nov 2026 09:00:00 +1300" },
+      ...(t.list ? [{ name: "List-Id", value: t.list }] : []),
     ];
     return [200, { id, messages: [{ id: `${id}-m1`, threadId: id, labelIds: [...t.labels], payload: { headers } }] }];
   }
@@ -120,12 +124,13 @@ class FakeGmail {
     const method = init.method ?? "GET";
     if (url.href === "https://oauth2.googleapis.com/token") {
       this.tokenRequests++;
-      this.validToken = `token-${++this.tokens}`;
-      return Response.json({ access_token: this.validToken, expires_in: 3600 });
+      const token = `token-${++this.tokens}`;
+      this.issued.add(`Bearer ${token}`);
+      return Response.json({ access_token: token, expires_in: 3600 });
     }
     const auth = new Headers(init.headers).get("Authorization");
     if (url.href === "https://gmail.googleapis.com/batch/gmail/v1") return this.batch(init, auth);
-    if (auth !== `Bearer ${this.validToken}`) return Response.json({ error: { code: 401, message: "bad token" } }, { status: 401 });
+    if (!this.issued.has(auth)) return Response.json({ error: { code: 401, message: "bad token" } }, { status: 401 });
     const path = url.pathname.replace("/gmail/v1/users/me", "");
     if (path === "/labels" && method === "GET") return Response.json({ labels: this.labels });
     if (path === "/labels" && method === "POST") {
@@ -195,7 +200,7 @@ class FakeGmail {
       });
     const kind = calls[0].method === "GET" ? "read" : calls[0].path.endsWith("/trash") ? "trash" : "modify";
     this.batches.push(`${kind}:${calls.length}`);
-    const rejectToken = this.rejectTokenOnce || auth !== `Bearer ${this.validToken}`;
+    const rejectToken = this.rejectTokenOnce || !this.issued.has(auth);
     this.rejectTokenOnce = false;
     const out = "batch_FAKE";
     const parts = calls.map((c) => {
@@ -540,6 +545,55 @@ describe("search_threads", () => {
       },
       thread_labels: ["INBOX"],
     });
+  });
+});
+
+describe("summarise_threads", () => {
+  beforeEach(() => {
+    gmail = new FakeGmail(0);
+    const add = (id, t) => gmail.threads.set(id, { labels: new Set(["INBOX", ...(t.unread ? ["UNREAD"] : [])]), ...t });
+    add("a1", { from: "GitHub <notifications@github.com>", subject: "[mailroom] Build #812 failed", list: "mailroom <mailroom.karlvr.github.com>", unread: true, date: "Wed, 11 Nov 2026 08:00:00 +1300" });
+    add("a2", { from: "GitHub <notifications@github.com>", subject: "[mailroom] Build #813 failed", list: "mailroom <mailroom.karlvr.github.com>" });
+    add("a3", { from: "noreply@github.com", subject: "Re: [mailroom] Build #814 failed", list: "<other.github.com>" });
+    add("a4", { from: "Ana <ana@example.com>", subject: "Lunch on 2026-11-12?", unread: true });
+  });
+
+  test("gives only the counts without group_by", async () => {
+    assert.deepEqual(await call("summarise_threads", {}), { account: "me@example.com", query: "in:inbox", total: 4, unread: 2 });
+    assert.deepEqual(gmail.batches, []);
+  });
+
+  test("groups by sender, with samples of the subjects", async () => {
+    const r = await call("summarise_threads", { group_by: "sender" });
+    assert.equal(r.grouped_threads, 4);
+    assert.deepEqual(r.groups, [
+      { key: "notifications@github.com", threads: 2, unread: 1, latest: "2026-11-10T19:00:00Z", subjects: ["[mailroom] Build #812 failed", "[mailroom] Build #813 failed"] },
+      { key: "noreply@github.com", threads: 1, unread: 0, latest: "2026-11-09T20:00:00Z", subjects: ["Re: [mailroom] Build #814 failed"] },
+      { key: "ana@example.com", threads: 1, unread: 1, latest: "2026-11-09T20:00:00Z", subjects: ["Lunch on 2026-11-12?"] },
+    ]);
+  });
+
+  test("groups by domain, list and subject pattern", async () => {
+    const keys = async (group_by) => (await call("summarise_threads", { group_by })).groups.map((g) => [g.key, g.threads]);
+    assert.deepEqual(await keys("domain"), [["github.com", 3], ["example.com", 1]]);
+    assert.deepEqual(await keys("list"), [["mailroom.karlvr.github.com", 2], ["other.github.com", 1], [null, 1]]);
+    assert.deepEqual(await keys("subject"), [["[mailroom] Build ## failed", 3], ["Lunch on #?", 1]]);
+    const bySubject = await call("summarise_threads", { group_by: "subject" });
+    assert.deepEqual(bySubject.groups[0].senders, ["GitHub <notifications@github.com>", "noreply@github.com"]);
+  });
+
+  test("gets one access token, also when its requests run at the same time", async () => {
+    await call("summarise_threads", { group_by: "sender" });
+    assert.equal(gmail.tokenRequests, 1);
+  });
+
+  test("limits the groups and the threads that it groups", async () => {
+    const r = await call("summarise_threads", { group_by: "sender", max_groups: 1, max_threads: 3 });
+    assert.equal(r.total, 4);
+    assert.equal(r.grouped_threads, 3);
+    assert.equal(r.groups.length, 1);
+    assert.deepEqual(r.groups.map((g) => g.key), ["notifications@github.com"]);
+    assert.deepEqual(r.other_groups, { groups: 1, threads: 1 });
   });
 });
 

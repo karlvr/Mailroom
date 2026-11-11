@@ -15,6 +15,12 @@ export interface ReleaseDay {
 // Add a change in the same commit as the change. Put all the changes of one day under one date.
 export const RELEASE_NOTES: ReleaseDay[] = [
   {
+    date: "2026-11-11",
+    changes: [
+      "An agent can summarise a mailbox in one step: how many threads match a search, how many are unread, and which senders, lists or subjects they come from.",
+    ],
+  },
+  {
     date: "2026-11-10",
     changes: [
       "A new setting for each mailbox, Allow replies, lets agents reply or reply to all, but not send new email or add people. Allow sending email includes replies.",
