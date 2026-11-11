@@ -415,12 +415,16 @@ type AccountWork<A> = (a: Account, args: A) => Promise<CallToolResult>;
 /**
  * Returns an MCP server with the tools for one caller. `origin` is the origin of this Worker, for the
  * links to its icons. The server calls `onAccountCall` after each tool call that works in one account.
+ * `toolListVersion` is the version of the tool list. The descriptions of list_accounts and
+ * about_mailroom give it, and their results give the current version, so that an agent can find out
+ * that its app has an old tool list.
  */
 export function buildServer(
   env: Env,
   { props, clientId }: McpCaller,
   origin: string,
   onAccountCall: (call: AccountCall) => void,
+  toolListVersion: string,
 ): McpServer {
   const server = new McpServer(
     {
@@ -447,7 +451,17 @@ export function buildServer(
 
   const noMailboxes = `The user has no linked mailboxes. The user can link a mailbox on the ${appName(env)} web page.`;
 
-  /** Returns true when the calling client loaded the current tool list, and null when the client ID is not known. */
+  /** The part of a description that lets an agent find out that its app has an old tool list. */
+  const versionRule =
+    `This tool list has version ${toolListVersion}. tool_list_version in the result is the version of the current tools. ` +
+    `When the two versions are different, your app has an old tool list. Then tell the user to reconnect ${appName(env)} in the app. ` +
+    `The steps for each app are on the Connect an agent page of the ${appName(env)} web page.`;
+
+  /**
+   * Returns true when the calling client loaded the current tool list, and null when the client ID is not
+   * known. Another session of the same client can load the tool list, so true does not show that the
+   * tool list of this session is current.
+   */
   const toolsUpToDate = async (): Promise<boolean | null> => {
     if (!clientId) return null;
     const [catalog, loaded] = await Promise.all([toolCatalog(env), loadedToolLists(env, props.userId)]);
@@ -777,14 +791,16 @@ export function buildServer(
         "To read the proposal, call get_context. " +
         "notice is present when Mailroom has a message for the user, for example that the user must reconnect Mailroom to get new tools. " +
         "Give the notice to the user. " +
+        `${versionRule} ` +
         "Call this tool first.",
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
       const accounts = await listAccounts(env, props.userId);
       if (!accounts.length) return text(noMailboxes);
-      const [contexts, upToDate] = await Promise.all([contextSummaries(env, props.userId), toolsUpToDate()]);
+      const [contexts, upToDate, catalog] = await Promise.all([contextSummaries(env, props.userId), toolsUpToDate(), toolCatalog(env)]);
       return text({
+        tool_list_version: catalog.version,
         ...(upToDate === false
           ? {
               notice:
@@ -1234,21 +1250,20 @@ export function buildServer(
     {
       title: `About ${appName(env)}`,
       description:
-        `Read about ${appName(env)}: its release notes, the names of its current tools, and whether your tool list is up to date. ` +
+        `Read about ${appName(env)}: its release notes, and the names and the version of its current tools. ` +
         `Call this tool when the user asks about ${appName(env)} or what changed in it, when list_accounts gives a notice, ` +
         "or when you need a tool that you do not have. Tell the user about the changes briefly, in plain words. " +
-        "When tools_up_to_date is false, your app has an old tool list. Then tell the user to reconnect " +
-        `${appName(env)} in the app. The steps for each app are at connect_page.`,
+        `${versionRule} connect_page is the Connect an agent page.`,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
-      const [catalog, upToDate] = await Promise.all([toolCatalog(env), toolsUpToDate()]);
+      const catalog = await toolCatalog(env);
       return text({
         app: appName(env),
         web_page: origin,
         release_notes_page: `${origin}/release-notes`,
         connect_page: `${origin}/connect`,
-        tools_up_to_date: upToDate,
+        tool_list_version: catalog.version,
         tools: catalog.names,
         release_notes: RELEASE_NOTES.slice(0, MAX_RELEASE_DAYS),
       });
@@ -2867,15 +2882,22 @@ export async function handleMcp(req: Request, env: Env, caller: McpCaller, ctx: 
   // Record the use of an account after the response, so that the database write does not delay the agent.
   const recordCall = (call: AccountCall) =>
     ctx.waitUntil(recordAccountCall(env, call).catch((e) => console.error("Mailroom could not record the use of an account", e)));
-  const transport = await connectedTransport(env, caller, new URL(req.url).origin, recordCall);
+  const catalog = await toolCatalog(env);
+  const transport = await connectedTransport(env, caller, new URL(req.url).origin, recordCall, catalog.version);
   const res = await transport.handleRequest(req);
-  if (listingClient && res.ok) await recordToolList(env, props.userId, listingClient, (await toolCatalog(env)).fingerprint);
+  if (listingClient && res.ok) await recordToolList(env, props.userId, listingClient, catalog.fingerprint);
   return res;
 }
 
-/** Returns a transport for one request, connected to a new MCP server for the caller. */
-async function connectedTransport(env: Env, caller: McpCaller, origin: string, onAccountCall: (call: AccountCall) => void) {
-  const server = buildServer(env, caller, origin, onAccountCall);
+/** Returns a transport for one request, connected to a new MCP server for the caller, with the tool list of version `toolListVersion`. */
+async function connectedTransport(
+  env: Env,
+  caller: McpCaller,
+  origin: string,
+  onAccountCall: (call: AccountCall) => void,
+  toolListVersion: string,
+) {
+  const server = buildServer(env, caller, origin, onAccountCall, toolListVersion);
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
@@ -2900,7 +2922,16 @@ export interface ToolCatalog {
   names: string[];
   /** A hash of the server instructions and the full tool list. Any change to them changes the fingerprint. */
   fingerprint: string;
+  /** The start of the fingerprint, which the tool descriptions give as the version of the tool list. */
+  version: string;
 }
+
+// The version of the tool list in the descriptions of the catalog. The version comes from the fingerprint
+// of the catalog, so the descriptions that make the fingerprint have this text in its place.
+const CATALOG_VERSION = "(version)";
+
+// The number of characters of the fingerprint in the version of a tool list.
+const VERSION_DIGITS = 12;
 
 // The catalog depends only on the code and the app name, so each isolate makes it once.
 const catalogs = new Map<string, Promise<ToolCatalog>>();
@@ -2923,7 +2954,7 @@ async function makeCatalog(env: Env): Promise<ToolCatalog> {
   const origin = "https://mailroom.invalid";
   const call = async (method: string, params: object) => {
     // The catalog calls no tools, so it records no use of an account.
-    const transport = await connectedTransport(env, caller, origin, () => {});
+    const transport = await connectedTransport(env, caller, origin, () => {}, CATALOG_VERSION);
     const res = await transport.handleRequest(
       new Request(`${origin}/mcp`, {
         method: "POST",
@@ -2941,10 +2972,8 @@ async function makeCatalog(env: Env): Promise<ToolCatalog> {
     clientInfo: { name: "mailroom-catalog", version: "1.0.0" },
   });
   const tools = (await call("tools/list", {})).tools as { name: string }[];
-  return {
-    names: tools.map((t) => t.name),
-    fingerprint: await sha256(JSON.stringify({ instructions: init.instructions, tools })),
-  };
+  const fingerprint = await sha256(JSON.stringify({ instructions: init.instructions, tools }));
+  return { names: tools.map((t) => t.name), fingerprint, version: fingerprint.slice(0, VERSION_DIGITS) };
 }
 
 /**

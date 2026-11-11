@@ -18,7 +18,7 @@ before(async () => {
   await build({
     stdin: {
       contents: `
-        export { buildServer } from ${JSON.stringify(join(root, "src/mcp.ts"))};
+        export { buildServer, toolCatalog } from ${JSON.stringify(join(root, "src/mcp.ts"))};
         export { parseBatchResponse, batchRequestBody } from ${JSON.stringify(join(root, "src/google.ts"))};
         export { TEST_ACCOUNT, OTHER_ACCOUNTS, resetState } from ${JSON.stringify(join(root, "test/support/db-stub.ts"))};
         export { addressList } from ${JSON.stringify(join(root, "src/mime.ts"))};
@@ -344,8 +344,13 @@ beforeEach(async () => {
     },
   };
   const env = { APP_NAME: "Mailroom", AI };
-  const server = mod.buildServer(env, { props: { userId: "user-1", email: "me@example.com" }, clientId: null }, "https://mailroom.test", (c) =>
-    calls.push(c),
+  const { version } = await mod.toolCatalog(env);
+  const server = mod.buildServer(
+    env,
+    { props: { userId: "user-1", email: "me@example.com" }, clientId: null },
+    "https://mailroom.test",
+    (c) => calls.push(c),
+    version,
   );
   const [a, b] = mod.InMemoryTransport.createLinkedPair();
   await server.connect(a);
@@ -1212,6 +1217,35 @@ describe("send_draft", () => {
     assert.deepEqual(await permissions(), { can_send: true, can_reply: true });
     allow(false, false);
     assert.deepEqual(await permissions(), { can_send: false, can_reply: false });
+  });
+});
+
+describe("tool list version", () => {
+  /** Returns the version in the description of a tool, and the version in its result, from a client of one server. */
+  const versions = async (c, name) => {
+    const { tools } = await c.listTools();
+    const described = /This tool list has version ([\w-]+)\./.exec(tools.find((t) => t.name === name).description)?.[1];
+    const current = JSON.parse((await c.callTool({ name, arguments: {} })).content[0].text).tool_list_version;
+    return { described, current };
+  };
+
+  test("list_accounts and about_mailroom give the same version as their descriptions", async () => {
+    for (const name of ["list_accounts", "about_mailroom"]) {
+      const { described, current } = await versions(client, name);
+      assert.ok(current?.length >= 12);
+      assert.equal(described, current);
+    }
+  });
+
+  test("an old tool list gives another version than the results", async () => {
+    const server = mod.buildServer({ APP_NAME: "Mailroom" }, { props: { userId: "user-1", email: "me@example.com" }, clientId: null }, "https://mailroom.test", () => {}, "old");
+    const [a, b] = mod.InMemoryTransport.createLinkedPair();
+    await server.connect(a);
+    const old = new mod.Client({ name: "test", version: "1" });
+    await old.connect(b);
+    const { described, current } = await versions(old, "about_mailroom");
+    assert.equal(described, "old");
+    assert.notEqual(current, "old");
   });
 });
 

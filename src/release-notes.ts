@@ -17,6 +17,7 @@ export const RELEASE_NOTES: ReleaseDay[] = [
   {
     date: "2026-11-12",
     changes: [
+      "An agent can find out when its app has an old list of Mailroom tools, and then asks you to reconnect.",
       "A bulk clean-up changes only the messages that the agent saw in its preview. A reply that arrives after the preview stays in your inbox, and drafts never change.",
       "Agents can keep notes between runs, such as when the last briefing ran or which threads already got an update. You can read and delete these notes on the Mailboxes page.",
       "An agent can read attachments: text and log files, calendar files, and PDF, Word and Excel documents, for example to find the amount and due date of an invoice.",

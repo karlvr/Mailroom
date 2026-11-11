@@ -110,7 +110,7 @@ The agent then has these tools:
 | Tool | What it does |
 | --- | --- |
 | `list_accounts` | Lists the mailboxes, with the name, the context notes and the settings of each mailbox, and the global context |
-| `about_mailroom` | Gives the release notes, the names of the current tools, and whether the tool list of the app is up to date |
+| `about_mailroom` | Gives the release notes, the names of the current tools, and the version of the current tool list |
 | `get_global_context` | Reads the live global context and the proposal that waits for you, if any |
 | `propose_global_context` | Proposes a new global context. The global context has at most one proposal, and a new proposal replaces it. The global context changes only when you accept the proposal on the Mailroom web page. |
 | `get_context` | Reads the live context of a mailbox and the proposal that waits for you, if any |
@@ -223,7 +223,7 @@ Each person must trust the operator of the deployment, because the operator can 
 
 An update keeps your `ADMIN_PASSWORD`, your settings and your linked mailboxes. `npm run deploy` applies new database migrations before it deploys the new code.
 
-To see what an update changes, open **Release notes** in the footer of each page, or go to `/release-notes`. When an update adds or changes tools, an agent gets the new tools only after you reconnect Mailroom in its app. The **New tools** part of the Connect an agent page has the steps for each app. Until then, the Mailboxes page shows a warning that names each agent connection with the old tools, and `list_accounts` asks the agent to tell you.
+To see what an update changes, open **Release notes** in the footer of each page, or go to `/release-notes`. When an update adds or changes tools, an agent gets the new tools only after you reconnect Mailroom in its app. The **New tools** part of the Connect an agent page has the steps for each app. Until then, the Mailboxes page shows a warning that names each agent connection with the old tools, and `list_accounts` asks the agent to tell you. The descriptions of `list_accounts` and `about_mailroom` also give the version of the tool list, and their results give the current version. Thus an agent with an old tool list finds the difference, also when another session of the same app has the new tools.
 
 An update can add a setup step or change one. Then the Mailboxes page shows a notice until the admin completes the new steps. To complete them:
 
