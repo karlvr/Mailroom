@@ -364,8 +364,10 @@ export interface BulkConfirmation {
   /** The SHA-256 of the confirmation token, in base64url. */
   tokenHash: string;
   accountId: string;
-  /** The tool and its arguments, as JSON. */
+  /** The tool and its arguments other than a list of threads, as JSON. */
   action: string;
+  /** For a tool that works on a list of threads, the hash of the list. Otherwise null. */
+  listed: string | null;
   /** The threads that the preview showed. */
   threads: PreviewThread[];
   /** The time when the preview expires, in milliseconds since the epoch. */
@@ -377,27 +379,37 @@ export async function saveBulkConfirmation(env: Env, c: BulkConfirmation): Promi
   await env.DB.batch([
     env.DB.prepare("DELETE FROM bulk_confirmations WHERE expires_at <= ?").bind(Date.now()),
     env.DB.prepare(
-      "INSERT INTO bulk_confirmations (token_hash, account_id, action, threads, expires_at) VALUES (?, ?, ?, ?, ?)",
-    ).bind(c.tokenHash, c.accountId, c.action, JSON.stringify(c.threads), c.expiresAt),
+      "INSERT INTO bulk_confirmations (token_hash, account_id, action, listed, threads, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).bind(c.tokenHash, c.accountId, c.action, c.listed, JSON.stringify(c.threads), c.expiresAt),
   ]);
 }
 
+/** What a confirmation gives, which must match its preview. */
+export interface BulkConfirmationCheck {
+  /** The SHA-256 of the confirmation token, in base64url. */
+  tokenHash: string;
+  accountId: string;
+  /** The tool and its arguments other than a list of threads, as JSON. */
+  action: string;
+  /** The hash of the list of threads, when the confirmation gives the list. */
+  listed?: string;
+  /** The number of threads of the preview, when the confirmation gives it. */
+  threadCount?: number;
+}
+
 /**
- * Deletes the preview with the token hash, and returns its threads, when the preview is of the
- * account and the action and did not expire. Otherwise returns null. Only one call gets the threads
- * of a preview, so a preview works once.
+ * Deletes the preview of a confirmation, and returns its threads, when the preview did not expire and
+ * matches each value that the confirmation gives. Otherwise returns null, and the preview stays. Only
+ * one call gets the threads of a preview, so a preview works once.
  */
-export async function takeBulkConfirmation(
-  env: Env,
-  tokenHash: string,
-  accountId: string,
-  action: string,
-): Promise<PreviewThread[] | null> {
+export async function takeBulkConfirmation(env: Env, check: BulkConfirmationCheck): Promise<PreviewThread[] | null> {
   const row = await env.DB.prepare(
-    `DELETE FROM bulk_confirmations WHERE token_hash = ? AND account_id = ? AND action = ? AND expires_at > ?
+    `DELETE FROM bulk_confirmations
+     WHERE token_hash = ?1 AND account_id = ?2 AND action = ?3 AND expires_at > ?4
+       AND (?5 IS NULL OR listed = ?5) AND (?6 IS NULL OR json_array_length(threads) = ?6)
      RETURNING threads`,
   )
-    .bind(tokenHash, accountId, action, Date.now())
+    .bind(check.tokenHash, check.accountId, check.action, Date.now(), check.listed ?? null, check.threadCount ?? null)
     .first<{ threads: string }>();
   return row ? (JSON.parse(row.threads) as PreviewThread[]) : null;
 }

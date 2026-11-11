@@ -604,6 +604,30 @@ describe("modify_threads_labels", () => {
     assert.deepEqual(gmail.modifyRequests.map((r) => r.ids.length), [3, 3]);
   });
 
+  test("a confirmation needs only the token and the thread count, not the list", async () => {
+    const p = await preview("modify_threads_labels", { thread_ids: ["t1", "t3", "t7"], add: ["Existing"] });
+    assert.equal(p.thread_count, 3);
+    assert.match(p.note, /thread_count 3 .*You do not need to give thread_ids again/);
+    const r = await call("modify_threads_labels", { add: ["Existing"], confirmation_token: p.confirmation_token, thread_count: 3 });
+    assert.equal(r.changed, 3);
+  });
+
+  test("a confirmation with another thread count does not use up the token", async () => {
+    const p = await preview("trash_threads_by_query", { query: failures, max_threads: 5 });
+    const wrong = await call("trash_threads_by_query", { query: failures, confirmation_token: p.confirmation_token, thread_count: 4 });
+    assert.match(wrong.text, /another thread_count/);
+    const r = await call("trash_threads_by_query", { query: failures, confirmation_token: p.confirmation_token, thread_count: 5 });
+    assert.equal(r.trashed, 5);
+  });
+
+  test("a confirmation of a list needs the thread count or the list, and a preview needs the list", async () => {
+    const p = await preview("modify_threads_labels", { thread_ids: ["t1"], add: ["Existing"] });
+    const bare = await call("modify_threads_labels", { add: ["Existing"], confirmation_token: p.confirmation_token });
+    assert.match(bare.text, /give the thread_count of the preview/);
+    assert.equal((await call("modify_threads_labels", { thread_ids: ["t1"], add: ["Existing"], confirmation_token: p.confirmation_token })).changed, 1);
+    assert.match((await call("modify_threads_labels", { add: ["Existing"] })).text, /Give thread_ids/);
+  });
+
   test("a token does not work for another list of threads", async () => {
     const p = await preview("modify_threads_labels", { thread_ids: ["t1"], add: ["Existing"] });
     const r = await call("modify_threads_labels", { thread_ids: ["t1", "t2"], add: ["Existing"], confirmation_token: p.confirmation_token });

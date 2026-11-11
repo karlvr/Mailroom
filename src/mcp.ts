@@ -1600,7 +1600,11 @@ export function buildServer(
       .array(z.string().min(1))
       .min(1)
       .max(MAX_BULK_THREADS)
-      .describe("The IDs of the threads to change. To confirm, give the same IDs as for the preview."),
+      .optional()
+      .describe(
+        "The IDs of the threads to change. A preview needs them. A confirmation does not need them, " +
+          "but when it gives them, they must be the same as for the preview.",
+      ),
   };
 
   /** The input that confirms a preview of a bulk tool. */
@@ -1609,9 +1613,9 @@ export function buildServer(
       .string()
       .optional()
       .describe("The confirmation_token of the preview. Leave it out to get a preview, which changes nothing."),
+    thread_count: z.number().int().min(1).optional().describe("For a confirmation: the thread_count of the preview"),
   };
 
-  /** The part of a description of a bulk tool about its two steps: the preview and the confirmation. */
   /** The input of the safeguards of a bulk tool. */
   const safeguardInput = {
     older_than_days: z
@@ -1655,11 +1659,13 @@ export function buildServer(
       ),
   };
 
+  /** The part of a description of a bulk tool about its two steps: the preview and the confirmation. */
   const confirmRules =
     "This tool works in two steps. First, call it without confirmation_token. Then it changes nothing, " +
     "and gives a preview and a confirmation_token. By default, the preview groups the threads by the sender of their latest message. " +
     "Check the preview against what the user asked for. A sender or a subject that does not fit shows that the selection is wrong. " +
-    `If the preview is right, call the tool again with the same arguments and the confirmation_token, within ${CONFIRM_MINUTES} minutes. ` +
+    `If the preview is right, call the tool again within ${CONFIRM_MINUTES} minutes with the confirmation_token, ` +
+    "the thread_count of the preview and the same other arguments. A confirmation does not need to give a list of thread_ids again. " +
     "Then the tool changes exactly the messages that the preview saw in its threads. It does not change a thread that the search matches by then, " +
     "or a message that arrives in a thread of the preview after the preview. " +
     "If a thread in the preview should not change, do not confirm. Make the search more specific, or remove the thread from the list, " +
@@ -1739,10 +1745,11 @@ export function buildServer(
    * gets a preview of the threads of `select` and a token, and changes nothing. The preview leaves out
    * the threads that the safeguards of the call leave out. A call with the token runs `apply` on the
    * messages that the preview saw in its threads, when the account and the action are the same as for
-   * the preview. `action` gives the arguments that a confirmation must repeat, which the results also
-   * show. `select` finds the threads: `list` gives the threads that the call lists, which a confirmation
-   * must also list, and `search` finds the threads that a Gmail search matches, other than the threads
-   * in `skip`, which the safeguards leave out, and counts those threads in `skipped`. `check` finds a mistake
+   * the preview, and the thread count or the list of threads too, when the call gives them. `action`
+   * gives the arguments that a confirmation must repeat, which the results also show. `select` finds the
+   * threads: `list` gives the threads that the call lists, or undefined when the call gives no list, and
+   * `search` finds the threads that a Gmail search matches, other than the threads in `skip`, which the
+   * safeguards leave out, and counts those threads in `skipped`. `check` finds a mistake
    * in the arguments before the tool reads any thread. `protect` is true when the tool leaves out
    * starred threads and threads with a message that the account sent, unless the call gives
    * include_protected.
@@ -1754,7 +1761,7 @@ export function buildServer(
       check?: (args: ShapeOutput<Shape>) => CallToolResult | null;
       action: (args: ShapeOutput<Shape>) => Record<string, unknown>;
       select:
-        | { list: (args: ShapeOutput<Shape>) => string[] }
+        | { list: (args: ShapeOutput<Shape>) => string[] | undefined }
         | {
             search: (
               a: Account,
@@ -1771,7 +1778,8 @@ export function buildServer(
       const args = input as ShapeOutput<Shape> &
         ShapeOutput<typeof safeguardInput> &
         Partial<ShapeOutput<typeof protectInput>> &
-        ShapeOutput<typeof previewInput> & { confirmation_token?: string };
+        ShapeOutput<typeof previewInput> &
+        ShapeOutput<typeof confirmInput>;
       const problem = work.check?.(args);
       if (problem) return problem;
       const about = {
@@ -1781,17 +1789,28 @@ export function buildServer(
         ...(args.seen_only ? { seen_only: true } : {}),
         ...(args.include_protected ? { include_protected: true } : {}),
       };
+      const action = JSON.stringify({ tool: name, ...about });
       const { select } = work;
-      // A confirmation must list the same threads, but the results do not repeat the list, because it can be long.
-      const listed = "list" in select ? { thread_ids: [...select.list(args)].sort() } : {};
-      const action = JSON.stringify({ tool: name, ...about, ...listed });
+      // A confirmation can leave out the list of threads, so the action does not have it. The results do not
+      // repeat it either, because it can be long.
+      const listed = "list" in select ? select.list(args) : undefined;
+      const listHash = (ids: string[]) => sha256(JSON.stringify([...ids].sort()));
 
       if (args.confirmation_token) {
-        const confirmed = await takeBulkConfirmation(env, await sha256(args.confirmation_token), a.id, action);
+        if ("list" in select && !listed && args.thread_count === undefined) {
+          return fail("To confirm, give the thread_count of the preview with the confirmation_token.");
+        }
+        const confirmed = await takeBulkConfirmation(env, {
+          tokenHash: await sha256(args.confirmation_token),
+          accountId: a.id,
+          action,
+          listed: listed && (await listHash(listed)),
+          threadCount: args.thread_count,
+        });
         if (!confirmed) {
           return fail(
-            "That confirmation_token does not work for this call. It expired, it was used, or the preview had other arguments. " +
-              "Call the tool without confirmation_token for a new preview.",
+            "That confirmation_token does not work for this call. It expired, it was used, " +
+              "or the preview had other arguments or another thread_count. Call the tool without confirmation_token for a new preview.",
           );
         }
         const result = await work.apply(a, confirmed, args);
@@ -1808,7 +1827,7 @@ export function buildServer(
           : new Set((await findThreads(a, `newer_than:${args.older_than_days}d`, MAX_RECENT_THREADS)).ids);
       let found: { ids: string[]; more?: boolean; skipped?: number };
       if ("list" in select) {
-        const listed = select.list(args);
+        if (!listed) return fail("Give thread_ids, the IDs of the threads to change.");
         const ids = listed.filter((id) => !newer.has(id));
         found = { ids, skipped: listed.length - ids.length };
       } else {
@@ -1843,6 +1862,7 @@ export function buildServer(
         tokenHash: await sha256(token),
         accountId: a.id,
         action,
+        listed: listed ? await listHash(listed) : null,
         threads: kept.map((t) => ({ threadId: t.id, messageIds: messagesToChange(t).map((m) => m.id) })),
         expiresAt,
       });
@@ -1858,8 +1878,10 @@ export function buildServer(
           confirmation_token: token,
           expires_at: new Date(expiresAt).toISOString(),
           note:
-            `Nothing changed yet. Check the preview. If all of the threads are right, call ${name} again with the same arguments ` +
-            "and this confirmation_token. Then the tool changes exactly the messages of these threads that the preview saw." +
+            `Nothing changed yet. Check the preview. If all of the threads are right, call ${name} again with this confirmation_token, ` +
+            `thread_count ${threads.length} and the same other arguments.` +
+            (listed ? " You do not need to give thread_ids again." : "") +
+            " Then the tool changes exactly the messages of these threads that the preview saw." +
             (shown.detail !== args.preview_detail
               ? ` The ${args.preview_detail} preview is longer than ${MAX_PREVIEW_CHARS} characters, so threads_by_sender gives only ` +
                 "the number of threads of each sender. For subjects and dates, get a preview of fewer threads."
@@ -1912,7 +1934,7 @@ export function buildServer(
     {
       check: (args) => labelProblem(args.add, args.remove),
       action: (args) => ({ add: args.add, remove: args.remove }),
-      select: { list: (args) => [...new Set(args.thread_ids)] },
+      select: { list: (args) => args.thread_ids && [...new Set(args.thread_ids)] },
       apply: applyLabels,
     },
   );
@@ -2406,7 +2428,7 @@ export function buildServer(
     },
     {
       action: () => ({}),
-      select: { list: (args) => [...new Set(args.thread_ids)] },
+      select: { list: (args) => args.thread_ids && [...new Set(args.thread_ids)] },
       apply: applyTrash,
       protect: true,
     },

@@ -44,15 +44,12 @@ export const saveBulkConfirmation = async (_env: unknown, c: real.BulkConfirmati
   confirmations.set(c.tokenHash, c);
 };
 
-export const takeBulkConfirmation = async (
-  _env: unknown,
-  tokenHash: string,
-  accountId: string,
-  action: string,
-): Promise<real.PreviewThread[] | null> => {
-  const c = confirmations.get(tokenHash);
-  if (!c || c.accountId !== accountId || c.action !== action || c.expiresAt <= Date.now()) return null;
-  confirmations.delete(tokenHash);
+export const takeBulkConfirmation = async (_env: unknown, check: real.BulkConfirmationCheck): Promise<real.PreviewThread[] | null> => {
+  const c = confirmations.get(check.tokenHash);
+  if (!c || c.accountId !== check.accountId || c.action !== check.action || c.expiresAt <= Date.now()) return null;
+  if (check.listed !== undefined && c.listed !== check.listed) return null;
+  if (check.threadCount !== undefined && c.threads.length !== check.threadCount) return null;
+  confirmations.delete(check.tokenHash);
   return c.threads;
 };
 
