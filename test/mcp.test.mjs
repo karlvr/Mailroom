@@ -502,6 +502,74 @@ describe("trash_threads_by_query", () => {
   });
 });
 
+describe("safeguards", () => {
+  const old = "Mon, 01 Jun 2026 09:00:00 +1200";
+  const recent = () => new Date(Date.now() - 3600_000).toUTCString();
+
+  beforeEach(() => {
+    gmail = new FakeGmail(0);
+    const add = (id, labels, date = old) => gmail.threads.set(id, { labels: new Set(["INBOX", ...labels]), subject: "Report", date });
+    add("seen", []);
+    add("unread", ["UNREAD"]);
+    add("new", [], recent());
+    add("starred", ["STARRED"]);
+    add("sent", ["SENT"]);
+  });
+
+  /** Returns the IDs of the threads in a full preview, and the counts of the threads that the safeguards left out. */
+  const kept = async (name, args) => {
+    const p = await preview(name, { query: "in:inbox", preview_detail: "full", ...args });
+    return { ids: (p.threads ?? []).map((t) => t.thread_id).sort(), left_out: p.left_out };
+  };
+
+  test("the label tools leave out nothing unless the call asks", async () => {
+    assert.deepEqual(await kept("modify_labels_by_query", { add: ["Existing"] }), {
+      ids: ["new", "seen", "sent", "starred", "unread"],
+      left_out: undefined,
+    });
+  });
+
+  test("older_than_days and seen_only leave out new and unread threads", async () => {
+    assert.deepEqual(await kept("modify_labels_by_query", { add: ["Existing"], older_than_days: 1, seen_only: true }), {
+      ids: ["seen", "sent", "starred"],
+      left_out: { newer: 1, unread: 1 },
+    });
+  });
+
+  test("by default, the trash tools leave out starred threads and threads with a sent message", async () => {
+    assert.deepEqual(await kept("trash_threads_by_query", {}), { ids: ["new", "seen", "unread"], left_out: { starred: 1, sent: 1 } });
+    const p = await preview("trash_threads", { thread_ids: ["starred", "seen"], preview_detail: "full" });
+    assert.deepEqual(p.threads.map((t) => t.thread_id), ["seen"]);
+  });
+
+  test("include_protected trashes those threads too, and a confirmation must repeat it", async () => {
+    assert.deepEqual(await kept("trash_threads_by_query", { include_protected: true }), {
+      ids: ["new", "seen", "sent", "starred", "unread"],
+      left_out: undefined,
+    });
+    const args = { thread_ids: ["starred", "sent"], include_protected: true };
+    const p = await preview("trash_threads", args);
+    const without = await call("trash_threads", { thread_ids: args.thread_ids, confirmation_token: p.confirmation_token });
+    assert.match(without.text, /does not work for this call/);
+    assert.equal((await call("trash_threads", { ...args, confirmation_token: p.confirmation_token })).trashed, 2);
+  });
+
+  test("only the trash tools have include_protected", async () => {
+    const { tools } = await client.listTools();
+    const has = (name) => "include_protected" in tools.find((t) => t.name === name).inputSchema.properties;
+    assert.deepEqual(["trash_threads", "trash_threads_by_query", "modify_threads_labels", "modify_labels_by_query"].map(has), [true, true, false, false]);
+  });
+
+  test("a confirmation must repeat the safeguards", async () => {
+    const p = await preview("trash_threads_by_query", { query: "in:inbox", seen_only: true });
+    const r = await call("trash_threads_by_query", { query: "in:inbox", confirmation_token: p.confirmation_token });
+    assert.match(r.text, /does not work for this call/);
+    const ok = await call("trash_threads_by_query", { query: "in:inbox", seen_only: true, confirmation_token: p.confirmation_token });
+    assert.equal(ok.trashed, 2);
+    assert.deepEqual([...gmail.threads].filter(([, t]) => t.trashed).map(([id]) => id).sort(), ["new", "seen"]);
+  });
+});
+
 describe("trash_threads", () => {
   test("trashes each thread and tries rate-limited threads again", async () => {
     const p = await preview("trash_threads", { thread_ids: ["t1", "t2"] });

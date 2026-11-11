@@ -15,8 +15,9 @@ export interface ReleaseDay {
 // Add a change in the same commit as the change. Put all the changes of one day under one date.
 export const RELEASE_NOTES: ReleaseDay[] = [
   {
-    date: "2026-11-11",
+    date: "2026-11-12",
     changes: [
+      "An agent can limit a bulk clean-up to mail you have already read, or to mail older than a number of days. By default, bulk trash leaves out starred threads and conversations that you wrote in.",
       "An agent can search or summarise all your mailboxes in one step, for example to find every email from one sender.",
       "An agent can summarise a mailbox in one step: how many threads match a search, how many are unread, and which senders, lists or subjects they come from.",
     ],

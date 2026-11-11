@@ -95,7 +95,8 @@ interface ProposalArgs {
   replaces_proposal_id?: number;
 }
 
-const WEEK_MS = 7 * 24 * 3600 * 1000;
+const DAY_MS = 24 * 3600 * 1000;
+const WEEK_MS = 7 * DAY_MS;
 
 // The largest number of days of release notes that about_mailroom gives.
 const MAX_RELEASE_DAYS = 10;
@@ -186,10 +187,41 @@ function describeAccount(a: Account, proposalWaits: boolean) {
   };
 }
 
+/** Returns the time that Gmail received a message, in milliseconds since the epoch, or NaN when the message has no valid time. */
+const messageMs = (m: GmailMessage | undefined): number =>
+  m?.internalDate ? Number(m.internalDate) : Date.parse(header(m?.payload?.headers, "Date") ?? "");
+
 /** Returns the time that Gmail received a message, as an ISO time in UTC, or null when the message has no valid time. */
 function messageTime(m: GmailMessage | undefined): string | null {
-  const ms = m?.internalDate ? Number(m.internalDate) : Date.parse(header(m?.payload?.headers, "Date") ?? "");
+  const ms = messageMs(m);
   return Number.isNaN(ms) ? null : new Date(ms).toISOString().replace(/\.000Z$/, "Z");
+}
+
+/** The rules that leave threads out of a change by a bulk tool. */
+interface Safeguards {
+  /** Leaves out each thread with a message newer than this number of days. */
+  olderThanDays?: number;
+  /** True when the rules leave out each thread with an unread message. */
+  seenOnly: boolean;
+  /** True when the rules leave out starred threads, and threads with a message that the account sent. */
+  protect: boolean;
+}
+
+/** Why the safeguards leave a thread out of a bulk change. */
+type LeftOut = "starred" | "sent" | "newer" | "unread";
+
+/** Returns why the safeguards leave a thread out, or null when they keep it. A message without a valid time counts as new. */
+function leftOutBy(t: GmailThread, rules: Safeguards, now: number): LeftOut | null {
+  const msgs = t.messages ?? [];
+  const has = (label: string) => msgs.some((m) => m.labelIds?.includes(label));
+  if (rules.protect && has("STARRED")) return "starred";
+  if (rules.protect && has("SENT")) return "sent";
+  if (rules.olderThanDays !== undefined) {
+    const limit = now - rules.olderThanDays * DAY_MS;
+    if (!msgs.every((m) => messageMs(m) <= limit)) return "newer";
+  }
+  if (rules.seenOnly && has("UNREAD")) return "unread";
+  return null;
 }
 
 /** The level of detail of each thread in a search result. */
@@ -1199,6 +1231,33 @@ export function buildServer(
   };
 
   /** The part of a description of a bulk tool about its two steps: the preview and the confirmation. */
+  /** The input of the safeguards of a bulk tool. */
+  const safeguardInput = {
+    older_than_days: z
+      .number()
+      .int()
+      .min(1)
+      .max(3650)
+      .optional()
+      .describe("Leave out each thread with a message newer than this number of days"),
+    seen_only: z.boolean().default(false).describe("When true, leave out each thread with an unread message"),
+  };
+
+  /** The part of a description of a bulk tool about its safeguards. */
+  const safeguardRules =
+    "To limit the change to threads that the user has already seen, give older_than_days, seen_only or both. " +
+    "older_than_days checks every message of the thread. A Gmail search with older_than: matches a thread by any one old message, " +
+    "also when the thread has a new reply. The preview counts the threads that the safeguards left out, in left_out. " +
+    "Those threads still match the search. When many threads are left out, make the search more specific, so that the next preview has other threads.";
+
+  /** The input that lets a bulk trash tool include the threads that it leaves out by default. */
+  const protectInput = {
+    include_protected: z
+      .boolean()
+      .default(false)
+      .describe("When true, also trash starred threads and threads with a message that the account sent"),
+  };
+
   /** The input that sets the detail of the preview of a bulk tool. */
   const previewInput = {
     preview_detail: z
@@ -1261,10 +1320,12 @@ export function buildServer(
 
   /**
    * Registers a bulk tool that works on many threads in two steps. A call without confirmation_token
-   * gets a preview of the threads of `select` and a token, and changes nothing. A call with the token
-   * runs `apply` on the threads of the preview, when the account and the action are the same as for
-   * the preview. `action` gives the arguments that a confirmation must repeat, and `check` finds a
-   * mistake in the arguments before the tool reads any thread.
+   * gets a preview of the threads of `select` and a token, and changes nothing. The preview leaves out
+   * the threads that the safeguards of the call leave out. A call with the token runs `apply` on the
+   * threads of the preview, when the account and the action are the same as for the preview. `action`
+   * gives the arguments that a confirmation must repeat, and `check` finds a mistake in the arguments
+   * before the tool reads any thread. `protect` is true when the tool leaves out starred threads and
+   * threads with a message that the account sent, unless the call gives include_protected.
    */
   const bulkTool = <Shape extends ZodRawShapeCompat & { account: z.ZodString }>(
     name: string,
@@ -1274,13 +1335,24 @@ export function buildServer(
       action: (args: ShapeOutput<Shape>) => Record<string, unknown>;
       select: (a: Account, args: ShapeOutput<Shape>) => Promise<{ ids: string[]; more?: boolean }>;
       apply: (a: Account, ids: string[], args: ShapeOutput<Shape>) => Promise<CallToolResult | Record<string, unknown>>;
+      protect?: boolean;
     },
-  ) =>
-    accountTool(name, { ...config, inputSchema: { ...config.inputSchema, ...previewInput, ...confirmInput } }, async (a, input) => {
-      const args = input as ShapeOutput<Shape> & { preview_detail: "grouped" | "full"; confirmation_token?: string };
+  ) => {
+    const inputSchema = { ...config.inputSchema, ...safeguardInput, ...(work.protect ? protectInput : {}), ...previewInput, ...confirmInput };
+    accountTool(name, { ...config, inputSchema }, async (a, input) => {
+      const args = input as ShapeOutput<Shape> &
+        ShapeOutput<typeof safeguardInput> &
+        Partial<ShapeOutput<typeof protectInput>> &
+        ShapeOutput<typeof previewInput> & { confirmation_token?: string };
       const problem = work.check?.(args);
       if (problem) return problem;
-      const about = { account: a.email, ...work.action(args) };
+      const about = {
+        account: a.email,
+        ...work.action(args),
+        ...(args.older_than_days !== undefined ? { older_than_days: args.older_than_days } : {}),
+        ...(args.seen_only ? { seen_only: true } : {}),
+        ...(args.include_protected ? { include_protected: true } : {}),
+      };
       const action = JSON.stringify({ tool: name, ...about });
 
       if (args.confirmation_token) {
@@ -1299,8 +1371,22 @@ export function buildServer(
       const { ids, more = false } = await work.select(a, args);
       const read = await readThreads(a, ids, ["From", "Subject", "Date"]);
       const { failed, notFound } = read;
-      const threads = read.threads.map(previewOf);
+      const rules: Safeguards = {
+        olderThanDays: args.older_than_days,
+        seenOnly: args.seen_only,
+        protect: work.protect === true && !args.include_protected,
+      };
+      const leftOut: Partial<Record<LeftOut, number>> = {};
+      const now = Date.now();
+      const threads = read.threads
+        .filter((t) => {
+          const reason = leftOutBy(t, rules, now);
+          if (reason) leftOut[reason] = (leftOut[reason] ?? 0) + 1;
+          return !reason;
+        })
+        .map(previewOf);
       const extra = {
+        ...(Object.keys(leftOut).length ? { left_out: leftOut } : {}),
         ...(more ? { more_matches: true } : {}),
         ...(notFound.length ? { not_found: notFound } : {}),
         ...(failed.length ? { not_read: failed } : {}),
@@ -1331,6 +1417,7 @@ export function buildServer(
         }),
       );
     });
+  };
 
   accountTool(
     "modify_thread_labels",
@@ -1371,7 +1458,7 @@ export function buildServer(
         `Add labels to many whole threads or remove labels from them. Give up to ${MAX_BULK_THREADS} thread IDs, ` +
         "for example from search_threads. Every thread gets the same change. " +
         `${confirmRules} After the confirmation, the result has the number of threads that changed, and each thread that failed with its error. ` +
-        `${labelRules} ${WRITE_RULE}`,
+        `${safeguardRules} ${labelRules} ${WRITE_RULE}`,
       inputSchema: { account: z.string(), ...threadIdsInput, ...labelChangeInput },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
@@ -1396,7 +1483,7 @@ export function buildServer(
         "Then, after you confirm, get a preview of the next threads. To skip the threads that changed, " +
         "make the search leave them out, for example with -label:Name after you add that label. " +
         `${confirmRules} After the confirmation, the result has the number of threads that changed, and each thread that failed with its error. ` +
-        `${labelRules} ${WRITE_RULE}`,
+        `${safeguardRules} ${labelRules} ${WRITE_RULE}`,
       inputSchema: { account: z.string(), ...queryInput, ...labelChangeInput },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
@@ -1682,7 +1769,10 @@ export function buildServer(
   /** The part of a description of a tool that trashes threads, about the trash. */
   const trashRules =
     "Gmail keeps trashed threads for 30 days, and the user can restore them during that time. " +
-    "Trash a thread only when the user instructed you to trash it, or to trash email like it.";
+    "Trash a thread only when the user instructed you to trash it, or to trash email like it. " +
+    "By default, this tool leaves out starred threads, and threads with a message that the account sent. " +
+    "To trash those threads too, give include_protected true. Give it when the instruction and the context of the user show " +
+    "that the user wants those threads in the trash, for example when the user asks to trash whole conversations that the user took part in.";
 
   /** Moves the threads of a confirmed preview to the trash, for a bulk trash tool. */
   const applyTrash = async (a: Account, ids: string[]) => {
@@ -1700,7 +1790,7 @@ export function buildServer(
       description:
         `Move many whole threads to the trash. Give up to ${MAX_BULK_THREADS} thread IDs, for example from search_threads. ` +
         `${confirmRules} After the confirmation, the result has the number of threads that Gmail moved to the trash, ` +
-        `and each thread that failed with its error. ${trashRules} ${WRITE_RULE}`,
+        `and each thread that failed with its error. ${safeguardRules} ${trashRules} ${WRITE_RULE}`,
       inputSchema: { account: z.string(), ...threadIdsInput },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
@@ -1708,6 +1798,7 @@ export function buildServer(
       action: (args) => ({ thread_ids: [...new Set(args.thread_ids)].sort() }),
       select: async (_a, args) => ({ ids: [...new Set(args.thread_ids)] }),
       apply: applyTrash,
+      protect: true,
     },
   );
 
@@ -1723,7 +1814,7 @@ export function buildServer(
         "Then, after you confirm, call the tool again with the same search for a preview of the next threads: " +
         "the threads in the trash no longer match. " +
         `${confirmRules} After the confirmation, the result has the number of threads that Gmail moved to the trash, ` +
-        `and each thread that failed with its error. ${trashRules} ${WRITE_RULE}`,
+        `and each thread that failed with its error. ${safeguardRules} ${trashRules} ${WRITE_RULE}`,
       inputSchema: { account: z.string(), ...queryInput },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
@@ -1731,6 +1822,7 @@ export function buildServer(
       action: (args) => ({ query: args.query }),
       select: (a, args) => findThreads(a, args.query, args.max_threads),
       apply: applyTrash,
+      protect: true,
     },
   );
 
