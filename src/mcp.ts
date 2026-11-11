@@ -111,6 +111,9 @@ const MAX_BULK_THREADS = 500;
 // The number of threads in the preview of a bulk tool that works by a search, when the agent does not give max_threads.
 const DEFAULT_BULK_THREADS = 100;
 
+// The largest number of different subjects of one sender in a grouped preview of a bulk tool.
+const PREVIEW_SUBJECTS = 3;
+
 // How long the preview of a bulk tool waits for the agent to confirm it.
 const CONFIRM_MINUTES = 10;
 
@@ -842,10 +845,21 @@ export function buildServer(
   };
 
   /** The part of a description of a bulk tool about its two steps: the preview and the confirmation. */
+  /** The input that sets the detail of the preview of a bulk tool. */
+  const previewInput = {
+    preview_detail: z
+      .enum(["grouped", "full"])
+      .default("grouped")
+      .describe(
+        `grouped gives the threads of the preview grouped by sender, with the number of threads, the dates and up to ${PREVIEW_SUBJECTS} subjects of each sender. ` +
+          "full gives the sender, subject and date of each thread. A confirmation does not need the same preview_detail.",
+      ),
+  };
+
   const confirmRules =
     "This tool works in two steps. First, call it without confirmation_token. Then it changes nothing, " +
-    "and gives a preview: each thread with the sender, subject and date of its latest message, and a confirmation_token. " +
-    "Check each thread of the preview against what the user asked for. " +
+    "and gives a preview and a confirmation_token. By default, the preview groups the threads by the sender of their latest message. " +
+    "Check the preview against what the user asked for. A sender or a subject that does not fit shows that the selection is wrong. " +
     `If the preview is right, call the tool again with the same arguments and the confirmation_token, within ${CONFIRM_MINUTES} minutes. ` +
     "Then the tool changes exactly the threads of the preview, also when the search matches other threads by then. " +
     "If a thread in the preview should not change, do not confirm. Make the search more specific, or remove the thread from the list, " +
@@ -861,9 +875,34 @@ export function buildServer(
       thread_id: t.id,
       from: header(h, "From") ?? null,
       subject: header(h, "Subject") ?? null,
-      date: header(h, "Date") ?? null,
+      date: messageTime(last),
       message_count: msgs.length,
     };
+  };
+
+  /**
+   * Returns the threads of a preview grouped by the address of their sender, largest group first. Each
+   * group has the dates of its newest and oldest thread, and up to PREVIEW_SUBJECTS different subjects.
+   */
+  const groupBySender = (threads: ReturnType<typeof previewOf>[]) => {
+    const groups = new Map<string, { from: string | null; threads: number; newest: string | null; oldest: string | null; subjects: Set<string> }>();
+    for (const t of threads) {
+      const key = addressList(t.from ?? undefined)[0] ?? t.from ?? "";
+      const g = groups.get(key) ?? { from: t.from, threads: 0, newest: t.date, oldest: t.date, subjects: new Set<string>() };
+      g.threads++;
+      // ISO times in UTC sort in time order as text.
+      if (t.date && (!g.newest || t.date > g.newest)) g.newest = t.date;
+      if (t.date && (!g.oldest || t.date < g.oldest)) g.oldest = t.date;
+      g.subjects.add(t.subject ?? "");
+      groups.set(key, g);
+    }
+    return [...groups.values()]
+      .sort((x, y) => y.threads - x.threads)
+      .map(({ subjects, ...g }) => ({
+        ...g,
+        subjects: [...subjects].slice(0, PREVIEW_SUBJECTS),
+        ...(subjects.size > PREVIEW_SUBJECTS ? { other_subjects: subjects.size - PREVIEW_SUBJECTS } : {}),
+      }));
   };
 
   /**
@@ -883,8 +922,8 @@ export function buildServer(
       apply: (a: Account, ids: string[], args: ShapeOutput<Shape>) => Promise<CallToolResult | Record<string, unknown>>;
     },
   ) =>
-    accountTool(name, { ...config, inputSchema: { ...config.inputSchema, ...confirmInput } }, async (a, input) => {
-      const args = input as ShapeOutput<Shape> & { confirmation_token?: string };
+    accountTool(name, { ...config, inputSchema: { ...config.inputSchema, ...previewInput, ...confirmInput } }, async (a, input) => {
+      const args = input as ShapeOutput<Shape> & { preview_detail: "grouped" | "full"; confirmation_token?: string };
       const problem = work.check?.(args);
       if (problem) return problem;
       const about = { account: a.email, ...work.action(args) };
@@ -912,7 +951,7 @@ export function buildServer(
         ...(notFound.length ? { not_found: notFound } : {}),
         ...(failed.length ? { not_read: failed } : {}),
       };
-      if (!threads.length) return unchanged(text({ ...about, threads: [], ...extra, note: "No thread to change. Nothing changed." }));
+      if (!threads.length) return unchanged(text({ ...about, thread_count: 0, ...extra, note: "No thread to change. Nothing changed." }));
       const token = randomToken();
       const expiresAt = Date.now() + CONFIRM_MINUTES * 60_000;
       await saveBulkConfirmation(env, {
@@ -927,12 +966,12 @@ export function buildServer(
           ...about,
           preview: true,
           thread_count: threads.length,
-          threads,
+          ...(args.preview_detail === "full" ? { threads } : { senders: groupBySender(threads) }),
           ...extra,
           confirmation_token: token,
           expires_at: new Date(expiresAt).toISOString(),
           note:
-            `Nothing changed yet. Check each thread. If all of them are right, call ${name} again with the same arguments ` +
+            `Nothing changed yet. Check the preview. If all of the threads are right, call ${name} again with the same arguments ` +
             "and this confirmation_token. Then the tool changes exactly these threads." +
             (more ? " More threads match. After you confirm, call the tool again for a preview of the next threads." : ""),
         }),

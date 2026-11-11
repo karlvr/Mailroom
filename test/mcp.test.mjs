@@ -100,9 +100,9 @@ class FakeGmail {
     const t = this.threads.get(id);
     if (!t) return [404, { error: { code: 404, message: "Requested entity was not found." } }];
     const headers = [
-      { name: "From", value: "Monitor <monitor@example.com>" },
+      { name: "From", value: t.from ?? "Monitor <monitor@example.com>" },
       { name: "Subject", value: t.subject },
-      { name: "Date", value: "Tue, 10 Nov 2026 09:00:00 +1300" },
+      { name: "Date", value: t.date ?? "Tue, 10 Nov 2026 09:00:00 +1300" },
     ];
     return [200, { id, messages: [{ id: `${id}-m1`, threadId: id, labelIds: [...t.labels], payload: { headers } }] }];
   }
@@ -280,22 +280,44 @@ const failures = 'subject:"PopularityService failure"';
 const kinds = (kind) => gmail.batches.filter((b) => b.startsWith(`${kind}:`)).map((b) => Number(b.split(":")[1]));
 
 describe("preview", () => {
-  test("shows the sender, subject and date of each thread, and does not count as a change", async () => {
-    const p = await preview("modify_labels_by_query", { query: failures, add: ["Ops"], remove: ["INBOX"] });
+  test("groups the threads by sender, and does not count as a change", async () => {
+    gmail.threads.set("x1", { labels: new Set(["INBOX"]), subject: "Hello", from: "Ana <ana@example.com>", date: "Wed, 11 Nov 2026 09:00:00 +1300" });
+    for (const [i, subject] of ["One", "Two", "Three", "Four"].entries()) {
+      gmail.threads.set(`y${i}`, { labels: new Set(["INBOX"]), subject, from: "news@example.com" });
+    }
+    const p = await preview("modify_labels_by_query", { query: "in:inbox", add: ["Ops"], remove: ["INBOX"] });
     assert.equal(p.preview, true);
+    assert.equal(p.thread_count, 65);
+    assert.equal(p.threads, undefined);
+    assert.deepEqual(p.senders, [
+      {
+        from: "Monitor <monitor@example.com>",
+        threads: 60,
+        newest: "2026-11-09T20:00:00Z",
+        oldest: "2026-11-09T20:00:00Z",
+        subjects: ["PopularityService failure", "Lunch"],
+      },
+      { from: "news@example.com", threads: 4, newest: "2026-11-09T20:00:00Z", oldest: "2026-11-09T20:00:00Z", subjects: ["One", "Two", "Three"], other_subjects: 1 },
+      { from: "Ana <ana@example.com>", threads: 1, newest: "2026-11-10T20:00:00Z", oldest: "2026-11-10T20:00:00Z", subjects: ["Hello"] },
+    ]);
+    assert.ok(p.confirmation_token.length > 20);
+    assert.ok(Date.parse(p.expires_at) > Date.now());
+    assert.deepEqual(kinds("read"), [25, 25, 15]);
+    assert.deepEqual(calls, [{ accountId: "acct-1", change: false }]);
+  });
+
+  test("shows the sender, subject and date of each thread on request", async () => {
+    const p = await preview("modify_labels_by_query", { query: failures, add: ["Ops"], remove: ["INBOX"], preview_detail: "full" });
     assert.equal(p.thread_count, 30);
     assert.deepEqual(p.threads[0], {
       thread_id: "t0",
       from: "Monitor <monitor@example.com>",
       subject: "PopularityService failure",
-      date: "Tue, 10 Nov 2026 09:00:00 +1300",
+      date: "2026-11-09T20:00:00Z",
       message_count: 1,
     });
     assert.ok(p.threads.every((t) => t.subject === "PopularityService failure"));
-    assert.ok(p.confirmation_token.length > 20);
-    assert.ok(Date.parse(p.expires_at) > Date.now());
     assert.deepEqual(kinds("read"), [25, 5]);
-    assert.deepEqual(calls, [{ accountId: "acct-1", change: false }]);
   });
 
   test("a confirmation changes exactly the threads of the preview, also when the search matches more by then", async () => {
@@ -338,12 +360,12 @@ describe("preview", () => {
 
   test("a search with no matches gives no token", async () => {
     const p = await preview("trash_threads_by_query", { query: 'subject:"nothing"' });
-    assert.deepEqual(p.threads, []);
+    assert.equal(p.thread_count, 0);
     assert.equal(p.confirmation_token, undefined);
   });
 
   test("a list with unknown threads previews only the threads that exist", async () => {
-    const p = await preview("trash_threads", { thread_ids: ["t1", "nope", "t1"] });
+    const p = await preview("trash_threads", { thread_ids: ["t1", "nope", "t1"], preview_detail: "full" });
     assert.deepEqual(p.threads.map((t) => t.thread_id), ["t1"]);
     assert.deepEqual(p.not_found, ["nope"]);
     const r = await call("trash_threads", { thread_ids: ["nope", "t1"], confirmation_token: p.confirmation_token });
@@ -441,7 +463,7 @@ describe("trash_threads_by_query", () => {
     for (const t of gmail.threads.values()) assert.equal(!!t.trashed, t.subject === "PopularityService failure");
     assert.deepEqual(kinds("trash"), [25, 5]);
     const again = await preview("trash_threads_by_query", { query: failures });
-    assert.deepEqual(again.threads, []);
+    assert.equal(again.thread_count, 0);
   });
 
   test("continues where the previous confirmation stopped", async () => {
