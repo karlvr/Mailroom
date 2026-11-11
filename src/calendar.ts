@@ -132,6 +132,46 @@ export function describeChange(e: CalendarEvent, since: number) {
   };
 }
 
+/** One row of a list of changes: one event, or the instances of a recurring event with one change. */
+type ChangeRow = ReturnType<typeof describeChange> & {
+  /** For the instances of a recurring event with one change, the number of the instances. */
+  instance_count?: number;
+  /** For the instances of a recurring event with one change, the start of the last instance. */
+  last_start?: string | null;
+};
+
+/**
+ * Returns the rows of a list of changes, in the order of `events`. Google gives each instance of a
+ * recurring event, so a new or changed series gives many events. The instances of one recurring event
+ * with the same change at the same time are one row: the row of the first instance, with
+ * instance_count and last_start. A moved instance has a row of its own.
+ */
+export function describeChanges(events: CalendarEvent[], since: number): ChangeRow[] {
+  const rows: ChangeRow[] = [];
+  // The time of an instance. A cancelled instance can have only its start in the series.
+  const when = (r: ChangeRow) => Date.parse(r.start ?? r.original_start ?? "");
+  // For each recurring event, change and time of the change: the index of the row, the number of instances and the last instance.
+  const groups = new Map<string, { index: number; count: number; last: ChangeRow }>();
+  for (const e of events) {
+    const row: ChangeRow = describeChange(e, since);
+    const moved = !!row.start && "original_start" in row;
+    const key = e.recurringEventId && !moved ? JSON.stringify([e.recurringEventId, row.change, row.updated]) : null;
+    const group = key ? groups.get(key) : undefined;
+    if (!key || !group) {
+      if (key) groups.set(key, { index: rows.length, count: 1, last: row });
+      rows.push(row);
+      continue;
+    }
+    group.count++;
+    if (when(row) < when(rows[group.index]!)) rows[group.index] = row;
+    if (when(row) > when(group.last)) group.last = row;
+  }
+  for (const g of groups.values()) {
+    if (g.count > 1) rows[g.index] = { ...rows[g.index]!, instance_count: g.count, last_start: g.last.start ?? g.last.original_start ?? null };
+  }
+  return rows;
+}
+
 export function summariseEvent(e: CalendarEvent) {
   return {
     event_id: e.id,

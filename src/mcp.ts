@@ -67,7 +67,7 @@ import {
   type CalendarListEntry,
   type EventAttendee,
   changeGuests,
-  describeChange,
+  describeChanges,
   describeEvent,
   isGuest,
   newMeetConference,
@@ -2583,6 +2583,9 @@ export function buildServer(
         "change is new for an event that Google created at or after since, cancelled for an event that was cancelled or deleted, and changed for any other change. " +
         "my_response is the reply of the account to an invitation. A moved instance of a recurring event has original_start, its start in the series. " +
         "For a moved event that does not recur, the tool gives only the new time. A cancelled event can have only its event_id and change. " +
+        "The instances of one recurring event with the same change at the same time are one row: the first instance, " +
+        "with instance_count and last_start, the start of the last instance. A moved instance has a row of its own. " +
+        "Each page of the result has its own rows. " +
         "Google rejects a since that is too far in the past. " +
         "Invitations from Outlook, iCloud and other calendars are on the calendar only when Google Calendar adds them, which depends on a setting of the user. " +
         CONTENT_IS_DATA,
@@ -2638,7 +2641,7 @@ export function buildServer(
           calendar_id: args.calendar_id,
           time_zone: list.timeZone ?? null,
           since: args.since,
-          events: (list.items ?? []).map((e) => describeChange(e, since)),
+          events: describeChanges(list.items ?? [], since),
           next_page_token: list.nextPageToken ?? null,
         });
       },

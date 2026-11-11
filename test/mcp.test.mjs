@@ -1441,6 +1441,42 @@ describe("list_event_changes", () => {
     assert.equal(q.singleEvents, "true");
   });
 
+  test("gives the instances of a recurring event with one change as one row", async () => {
+    const at = (dateTime) => ({ dateTime, timeZone: "Pacific/Auckland" });
+    const weekly = (day, more = {}) => ({
+      id: `weekly_202611${day}`,
+      recurringEventId: "weekly",
+      status: "confirmed",
+      created: "2026-11-12T01:00:00Z",
+      updated: "2026-11-12T01:00:00Z",
+      summary: "Planning",
+      start: at(`2026-11-${day}T09:00:00+13:00`),
+      end: at(`2026-11-${day}T10:00:00+13:00`),
+      originalStartTime: at(`2026-11-${day}T09:00:00+13:00`),
+      ...more,
+    });
+    const dropped = (day) => ({ id: `dropped_202611${day}`, recurringEventId: "dropped", status: "cancelled", updated: "2026-11-12T03:00:00Z", originalStartTime: at(`2026-11-${day}T14:00:00+13:00`) });
+    gmail.events = [
+      weekly("19"),
+      weekly("12"),
+      weekly("26", { updated: "2026-11-12T04:00:00Z", start: at("2026-11-26T11:00:00+13:00"), end: at("2026-11-26T12:00:00+13:00") }),
+      dropped("13"),
+      weekly("30"),
+      dropped("20"),
+      { id: "dropped_20261127", recurringEventId: "dropped", status: "cancelled", updated: "2026-11-12T05:00:00Z", originalStartTime: at("2026-11-27T14:00:00+13:00") },
+    ];
+    const r = await call("list_event_changes", { since: "2026-11-12T08:00:00+13:00" });
+    assert.deepEqual(
+      r.events.map((e) => [e.event_id, e.change, e.start, e.instance_count ?? null, e.last_start ?? null]),
+      [
+        ["weekly_20261112", "new", "2026-11-12T09:00:00+13:00", 3, "2026-11-30T09:00:00+13:00"],
+        ["weekly_20261126", "new", "2026-11-26T11:00:00+13:00", null, null],
+        ["dropped_20261113", "cancelled", null, 2, "2026-11-20T14:00:00+13:00"],
+        ["dropped_20261127", "cancelled", null, null, null],
+      ],
+    );
+  });
+
   test("explains a since that is too far in the past", async () => {
     gmail.eventsGone = true;
     assert.match((await call("list_event_changes", { since: "2026-01-01T00:00:00Z" })).text, /too far in the past/);
