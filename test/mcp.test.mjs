@@ -415,6 +415,42 @@ describe("preview", () => {
     assert.deepEqual(calls, [{ accountId: "acct-1", change: false }]);
   });
 
+  test("gives only the number of threads of each sender on request", async () => {
+    gmail.threads.set("x1", { labels: new Set(["INBOX"]), subject: "Hello", from: "Ana <Ana@Example.com>" });
+    for (const i of [0, 1, 2]) gmail.threads.set(`y${i}`, { labels: new Set(["INBOX"]), subject: `News ${i}`, from: "news@example.com" });
+    const p = await preview("modify_labels_by_query", { query: "in:inbox", remove: ["INBOX"], preview_detail: "senders" });
+    assert.equal(p.preview_detail, "senders");
+    assert.equal(p.senders, undefined);
+    assert.equal(JSON.stringify(p.threads_by_sender), JSON.stringify({ "monitor@example.com": 60, "news@example.com": 3, "ana@example.com": 1 }));
+    assert.doesNotMatch(p.note, /characters/);
+  });
+
+  test("gives only the number of threads of each sender when the preview is long", async () => {
+    for (let i = 0; i < 200; i++) {
+      gmail.threads.set(`z${i}`, { labels: new Set(["INBOX"]), subject: `Your weekly digest number ${i} from the store`, from: `Store ${i} <store${i}@example.com>` });
+    }
+    for (const preview_detail of ["grouped", "full"]) {
+      const p = await preview("trash_threads_by_query", { query: "in:inbox", max_threads: 500, preview_detail });
+      assert.equal(p.thread_count, 260);
+      assert.equal(p.preview_detail, "senders");
+      assert.equal(p.senders, undefined);
+      assert.equal(p.threads, undefined);
+      assert.equal(Object.keys(p.threads_by_sender).length, 201);
+      assert.equal(p.threads_by_sender["store7@example.com"], 1);
+      assert.match(p.note, new RegExp(`The ${preview_detail} preview is longer than 20000 characters`));
+    }
+  });
+
+  test("does not repeat the list of threads", async () => {
+    const ids = Array.from({ length: 30 }, (_, i) => `t${i}`);
+    const p = await preview("modify_threads_labels", { thread_ids: ids, add: ["Existing"] });
+    assert.equal(p.thread_ids, undefined);
+    assert.equal(p.preview_detail, "grouped");
+    const r = await call("modify_threads_labels", { thread_ids: ids, add: ["Existing"], confirmation_token: p.confirmation_token });
+    assert.equal(r.changed, 30);
+    assert.equal(r.thread_ids, undefined);
+  });
+
   test("shows the sender, subject and date of each thread on request", async () => {
     const p = await preview("modify_labels_by_query", { query: failures, add: ["Ops"], remove: ["INBOX"], preview_detail: "full" });
     assert.equal(p.thread_count, 30);

@@ -155,6 +155,10 @@ const DEFAULT_BULK_THREADS = 100;
 // The largest number of different subjects of one sender in a grouped preview of a bulk tool.
 const PREVIEW_SUBJECTS = 3;
 
+// The longest grouped or full preview of a bulk tool, in characters. An agent cannot easily read a longer
+// tool result in one piece, so a longer preview gives only the number of threads of each sender.
+const MAX_PREVIEW_CHARS = 20_000;
+
 // How long the preview of a bulk tool waits for the agent to confirm it.
 const CONFIRM_MINUTES = 10;
 
@@ -1596,11 +1600,14 @@ export function buildServer(
   /** The input that sets the detail of the preview of a bulk tool. */
   const previewInput = {
     preview_detail: z
-      .enum(["grouped", "full"])
+      .enum(["grouped", "senders", "full"])
       .default("grouped")
       .describe(
         `grouped gives the threads of the preview grouped by sender, with the number of threads, the dates and up to ${PREVIEW_SUBJECTS} subjects of each sender. ` +
-          "full gives the sender, subject and date of each thread. A confirmation does not need the same preview_detail.",
+          "senders gives only the number of threads of each sender address, the shortest preview. " +
+          "full gives the sender, subject and date of each thread. " +
+          `When a grouped or full preview is longer than ${MAX_PREVIEW_CHARS} characters, the result has the senders preview instead, and a note. ` +
+          "A confirmation does not need the same preview_detail.",
       ),
   };
 
@@ -1629,14 +1636,19 @@ export function buildServer(
     };
   };
 
+  type ThreadPreview = ReturnType<typeof previewOf>;
+
+  /** Returns the address of the sender of a thread in a preview. */
+  const senderOf = (t: ThreadPreview) => addressList(t.from ?? undefined)[0] ?? t.from ?? "";
+
   /**
    * Returns the threads of a preview grouped by the address of their sender, largest group first. Each
    * group has the dates of its newest and oldest thread, and up to PREVIEW_SUBJECTS different subjects.
    */
-  const groupBySender = (threads: ReturnType<typeof previewOf>[]) => {
+  const groupBySender = (threads: ThreadPreview[]) => {
     const groups = new Map<string, { from: string | null; threads: number; newest: string | null; oldest: string | null; subjects: Set<string> }>();
     for (const t of threads) {
-      const key = addressList(t.from ?? undefined)[0] ?? t.from ?? "";
+      const key = senderOf(t);
       const g = groups.get(key) ?? { from: t.from, threads: 0, newest: t.date, oldest: t.date, subjects: new Set<string>() };
       g.threads++;
       // ISO times in UTC sort in time order as text.
@@ -1654,14 +1666,38 @@ export function buildServer(
       }));
   };
 
+  /** Returns the number of threads of each sender address in a preview, largest number first. */
+  const countBySender = (threads: ThreadPreview[]) => {
+    const counts = new Map<string, number>();
+    for (const t of threads) {
+      const key = senderOf(t);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return Object.fromEntries([...counts].sort((x, y) => y[1] - x[1]));
+  };
+
+  /**
+   * Returns the threads of a preview in the form that `detail` names, and the name of the form that it
+   * gives. A grouped or full form longer than MAX_PREVIEW_CHARS becomes the senders form, the shortest.
+   */
+  const previewBody = (threads: ThreadPreview[], detail: ShapeOutput<typeof previewInput>["preview_detail"]) => {
+    if (detail !== "senders") {
+      const body = detail === "full" ? { threads } : { senders: groupBySender(threads) };
+      if (JSON.stringify(body).length <= MAX_PREVIEW_CHARS) return { detail, body };
+    }
+    return { detail: "senders" as const, body: { threads_by_sender: countBySender(threads) } };
+  };
+
   /**
    * Registers a bulk tool that works on many threads in two steps. A call without confirmation_token
    * gets a preview of the threads of `select` and a token, and changes nothing. The preview leaves out
    * the threads that the safeguards of the call leave out. A call with the token runs `apply` on the
    * messages that the preview saw in its threads, when the account and the action are the same as for
-   * the preview. `action` gives the arguments that a confirmation must repeat, and `check` finds a
-   * mistake in the arguments before the tool reads any thread. `protect` is true when the tool leaves
-   * out starred threads and threads with a message that the account sent, unless the call gives
+   * the preview. `action` gives the arguments that a confirmation must repeat, which the results also
+   * show. `select` finds the threads: `list` gives the threads that the call lists, which a confirmation
+   * must also list, and `search` finds the threads that a Gmail search matches. `check` finds a mistake
+   * in the arguments before the tool reads any thread. `protect` is true when the tool leaves out
+   * starred threads and threads with a message that the account sent, unless the call gives
    * include_protected.
    */
   const bulkTool = <Shape extends ZodRawShapeCompat & { account: z.ZodString }>(
@@ -1670,7 +1706,9 @@ export function buildServer(
     work: {
       check?: (args: ShapeOutput<Shape>) => CallToolResult | null;
       action: (args: ShapeOutput<Shape>) => Record<string, unknown>;
-      select: (a: Account, args: ShapeOutput<Shape>) => Promise<{ ids: string[]; more?: boolean }>;
+      select:
+        | { list: (args: ShapeOutput<Shape>) => string[] }
+        | { search: (a: Account, args: ShapeOutput<Shape>) => Promise<{ ids: string[]; more?: boolean }> };
       apply: (a: Account, threads: PreviewThread[], args: ShapeOutput<Shape>) => Promise<CallToolResult | Record<string, unknown>>;
       protect?: boolean;
     },
@@ -1690,7 +1728,10 @@ export function buildServer(
         ...(args.seen_only ? { seen_only: true } : {}),
         ...(args.include_protected ? { include_protected: true } : {}),
       };
-      const action = JSON.stringify({ tool: name, ...about });
+      const { select } = work;
+      // A confirmation must list the same threads, but the results do not repeat the list, because it can be long.
+      const listed = "list" in select ? { thread_ids: [...select.list(args)].sort() } : {};
+      const action = JSON.stringify({ tool: name, ...about, ...listed });
 
       if (args.confirmation_token) {
         const confirmed = await takeBulkConfirmation(env, await sha256(args.confirmation_token), a.id, action);
@@ -1705,7 +1746,7 @@ export function buildServer(
         return text({ ...about, confirmed: true, threads: confirmed.length, ...result });
       }
 
-      const { ids, more = false } = await work.select(a, args);
+      const { ids, more = false } = "list" in select ? { ids: select.list(args), more: false } : await select.search(a, args);
       const read = await readThreads(a, ids, ["From", "Subject", "Date"]);
       const { failed, notFound } = read;
       const rules: Safeguards = {
@@ -1737,18 +1778,24 @@ export function buildServer(
         threads: kept.map((t) => ({ threadId: t.id, messageIds: messagesToChange(t).map((m) => m.id) })),
         expiresAt,
       });
+      const shown = previewBody(threads, args.preview_detail);
       return unchanged(
         text({
           ...about,
           preview: true,
           thread_count: threads.length,
-          ...(args.preview_detail === "full" ? { threads } : { senders: groupBySender(threads) }),
+          preview_detail: shown.detail,
+          ...shown.body,
           ...extra,
           confirmation_token: token,
           expires_at: new Date(expiresAt).toISOString(),
           note:
             `Nothing changed yet. Check the preview. If all of the threads are right, call ${name} again with the same arguments ` +
             "and this confirmation_token. Then the tool changes exactly the messages of these threads that the preview saw." +
+            (shown.detail !== args.preview_detail
+              ? ` The ${args.preview_detail} preview is longer than ${MAX_PREVIEW_CHARS} characters, so threads_by_sender gives only ` +
+                "the number of threads of each sender. For subjects and dates, get a preview of fewer threads."
+              : "") +
             (more ? " More threads match. After you confirm, call the tool again for a preview of the next threads." : ""),
         }),
       );
@@ -1796,8 +1843,8 @@ export function buildServer(
     },
     {
       check: (args) => labelProblem(args.add, args.remove),
-      action: (args) => ({ thread_ids: [...new Set(args.thread_ids)].sort(), add: args.add, remove: args.remove }),
-      select: async (_a, args) => ({ ids: [...new Set(args.thread_ids)] }),
+      action: (args) => ({ add: args.add, remove: args.remove }),
+      select: { list: (args) => [...new Set(args.thread_ids)] },
       apply: applyLabels,
     },
   );
@@ -1822,7 +1869,7 @@ export function buildServer(
     {
       check: (args) => labelProblem(args.add, args.remove),
       action: (args) => ({ query: args.query, add: args.add, remove: args.remove }),
-      select: (a, args) => findThreads(a, args.query, args.max_threads),
+      select: { search: (a, args) => findThreads(a, args.query, args.max_threads) },
       apply: applyLabels,
     },
   );
@@ -2290,8 +2337,8 @@ export function buildServer(
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
     {
-      action: (args) => ({ thread_ids: [...new Set(args.thread_ids)].sort() }),
-      select: async (_a, args) => ({ ids: [...new Set(args.thread_ids)] }),
+      action: () => ({}),
+      select: { list: (args) => [...new Set(args.thread_ids)] },
       apply: applyTrash,
       protect: true,
     },
@@ -2315,7 +2362,7 @@ export function buildServer(
     },
     {
       action: (args) => ({ query: args.query }),
-      select: (a, args) => findThreads(a, args.query, args.max_threads),
+      select: { search: (a, args) => findThreads(a, args.query, args.max_threads) },
       apply: applyTrash,
       protect: true,
     },
