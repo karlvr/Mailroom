@@ -567,12 +567,15 @@ describe("send_draft", () => {
   });
 
   test("list_accounts gives can_reply", async () => {
-    const accounts = async () => (await client.callTool({ name: "list_accounts", arguments: {} })).content[0].text;
-    assert.match(await accounts(), /"can_send": false,\s*"can_reply": true/);
+    const permissions = async () => {
+      const [a] = JSON.parse((await client.callTool({ name: "list_accounts", arguments: {} })).content[0].text).accounts;
+      return { can_send: a.can_send, can_reply: a.can_reply };
+    };
+    assert.deepEqual(await permissions(), { can_send: false, can_reply: true });
     allow(true, false);
-    assert.match(await accounts(), /"can_send": true,\s*"can_reply": true/);
+    assert.deepEqual(await permissions(), { can_send: true, can_reply: true });
     allow(false, false);
-    assert.match(await accounts(), /"can_send": false,\s*"can_reply": false/);
+    assert.deepEqual(await permissions(), { can_send: false, can_reply: false });
   });
 });
 

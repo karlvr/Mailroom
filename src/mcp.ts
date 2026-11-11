@@ -139,8 +139,9 @@ interface GmailLabel {
   type: "system" | "user";
 }
 
+// Compact JSON, because indentation adds about a quarter to the size of a result and agents do not need it.
 const text = (value: unknown) => ({
-  content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
+  content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value) }],
 });
 
 const fail = (message: string) => ({ content: [{ type: "text" as const, text: message }], isError: true });
