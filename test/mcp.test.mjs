@@ -468,6 +468,44 @@ describe("trash_threads", () => {
   });
 });
 
+describe("search_threads", () => {
+  test("gives compact rows, and reads the threads in batches", async () => {
+    gmail.threads.get("t0").labels.add("UNREAD");
+    const r = await call("search_threads", { query: "in:inbox", max_results: 50 });
+    assert.equal(r.threads.length, 50);
+    assert.deepEqual(r.threads[0], {
+      thread_id: "t0",
+      from: "Monitor <monitor@example.com>",
+      subject: "PopularityService failure",
+      date: "2026-11-09T20:00:00Z",
+      snippet: null,
+      labels: ["INBOX", "UNREAD"],
+      unread: true,
+      messages: 1,
+    });
+    assert.equal(r.threads[1].unread, false);
+    assert.equal(r.next_page_token, "50");
+    assert.deepEqual(kinds("read"), [25, 25]);
+  });
+
+  test("gives full rows on request", async () => {
+    const r = await call("search_threads", { query: failures, max_results: 1, detail: "full" });
+    assert.deepEqual(r.threads[0], {
+      thread_id: "t0",
+      message_count: 1,
+      participants: ["Monitor <monitor@example.com>"],
+      latest: {
+        message_id: "t0-m1",
+        from: "Monitor <monitor@example.com>",
+        date: "Tue, 10 Nov 2026 09:00:00 +1300",
+        subject: "PopularityService failure",
+        labels: ["INBOX"],
+      },
+      thread_labels: ["INBOX"],
+    });
+  });
+});
+
 describe("modify_thread_labels", () => {
   test("still changes one thread", async () => {
     const r = await call("modify_thread_labels", { thread_id: "t5", add: ["Existing"], remove: ["INBOX"] });

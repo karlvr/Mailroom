@@ -115,7 +115,7 @@ The agent then has these tools:
 | `propose_global_context` | Proposes a new global context. The global context has at most one proposal, and a new proposal replaces it. The global context changes only when you accept the proposal on the Mailroom web page. |
 | `get_context` | Reads the live context of a mailbox and the proposal that waits for you, if any |
 | `propose_context` | Proposes new context notes for a mailbox. A mailbox has at most one proposal, and a new proposal replaces it. The context changes only when you accept the proposal on the Mailroom web page. |
-| `search_threads` | Searches one mailbox with Gmail search syntax |
+| `search_threads` | Searches one mailbox with Gmail search syntax. It gives a compact row for each thread, or more details on request. |
 | `get_thread` | Reads a whole thread as plain text |
 | `list_labels` | Lists the labels of one mailbox |
 | `modify_thread_labels` | Adds labels to a thread or removes labels from it. When it adds a label that does not exist, it creates that label. Removing `INBOX` archives the thread. The tool rejects `TRASH` and `SPAM`. |

@@ -163,6 +163,49 @@ function describeAccount(a: Account, proposalWaits: boolean) {
   };
 }
 
+/** Returns the time that Gmail received a message, as an ISO time in UTC, or null when the message has no valid time. */
+function messageTime(m: GmailMessage | undefined): string | null {
+  const ms = m?.internalDate ? Number(m.internalDate) : Date.parse(header(m?.payload?.headers, "Date") ?? "");
+  return Number.isNaN(ms) ? null : new Date(ms).toISOString().replace(/\.000Z$/, "Z");
+}
+
+/** The level of detail of each thread in a search result. */
+type SearchDetail = "compact" | "full";
+
+// The headers of each message that a search reads. A full result needs all of them.
+const SEARCH_HEADERS = ["From", "To", "Cc", "Subject", "Date"];
+
+/**
+ * Returns a thread as a search result gives it. A compact row has the latest message and the labels of
+ * the whole thread. A full row also has the To and Cc of the latest message, and each sender in the thread.
+ */
+function threadRow(t: GmailThread, labels: Map<string, string>, detail: SearchDetail) {
+  const msgs = t.messages ?? [];
+  const last = msgs[msgs.length - 1];
+  const labelIds = new Set(msgs.flatMap((m) => m.labelIds ?? []));
+  const labelNames = [...labelIds].map((id) => labels.get(id) ?? id);
+  if (detail === "full") {
+    return {
+      thread_id: t.id,
+      message_count: msgs.length,
+      participants: [...new Set(msgs.map((m) => header(m.payload?.headers, "From")).filter(Boolean))],
+      latest: last ? summarise(last, labels) : null,
+      thread_labels: labelNames,
+    };
+  }
+  const h = last?.payload?.headers;
+  return {
+    thread_id: t.id,
+    from: header(h, "From") ?? null,
+    subject: header(h, "Subject") ?? null,
+    date: messageTime(last),
+    snippet: last?.snippet ?? null,
+    labels: labelNames,
+    unread: labelIds.has("UNREAD"),
+    messages: msgs.length,
+  };
+}
+
 function summarise(m: GmailMessage, labels: Map<string, string>) {
   const h = m.payload?.headers;
   return {
@@ -298,6 +341,98 @@ export function buildServer(
               `and keep the Calendar check boxes selected.`,
           );
 
+  /**
+   * Makes one Gmail call for each of many threads, with Gmail batch requests. `call` gives the call
+   * for a thread. Tries each call that Gmail limits or that fails on the Gmail side again, after a
+   * pause. Returns the answer of Gmail for each thread that succeeded, and the error of each thread
+   * that failed. `notFound` has the threads that Gmail did not find.
+   */
+  const eachThread = async (
+    a: Account,
+    threadIds: string[],
+    call: (id: string) => BatchCall,
+  ): Promise<{ done: Map<string, unknown>; failed: { thread_id: string; error: string }[]; notFound: string[] }> => {
+    let pending = [...new Set(threadIds)];
+    const done = new Map<string, unknown>();
+    const failed = new Map<string, { status: number; error: string }>();
+    for (let attempt = 0; attempt <= BATCH_RETRIES && pending.length; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
+      const retry: string[] = [];
+      for (let i = 0; i < pending.length; i += BATCH_SIZE) {
+        const ids = pending.slice(i, i + BATCH_SIZE);
+        const results = await gmailBatch(env, a, ids.map(call));
+        results.forEach((r, j) => {
+          const id = ids[j]!;
+          if (!r.error) {
+            done.set(id, r.body);
+            failed.delete(id);
+            return;
+          }
+          failed.set(id, { status: r.status, error: r.error });
+          if (r.status === 0 || r.status === 429 || r.status >= 500) retry.push(id);
+        });
+      }
+      pending = retry;
+    }
+    const all = [...failed];
+    return {
+      done,
+      failed: all.filter(([, f]) => f.status !== 404).map(([thread_id, f]) => ({ thread_id, error: f.error })),
+      notFound: all.filter(([, f]) => f.status === 404).map(([id]) => id),
+    };
+  };
+
+  /**
+   * Reads the threads with the IDs in Gmail batch requests, with the labels of each message and the
+   * headers in `headers`. Returns the threads that Gmail read, in the order of `ids`. `notFound` has the
+   * threads that Gmail did not find, and `failed` has the threads that Gmail did not read.
+   */
+  const readThreads = async (
+    a: Account,
+    ids: string[],
+    headers: readonly string[],
+  ): Promise<{ threads: GmailThread[]; failed: { thread_id: string; error: string }[]; notFound: string[] }> => {
+    const query = headers.map((h) => `&metadataHeaders=${encodeURIComponent(h)}`).join("");
+    const { done, failed, notFound } = await eachThread(a, ids, (id) => ({
+      method: "GET",
+      path: `/threads/${encodeURIComponent(id)}?format=metadata${query}`,
+    }));
+    return { threads: [...new Set(ids)].flatMap((id) => (done.has(id) ? [done.get(id) as GmailThread] : [])), failed, notFound };
+  };
+
+  /** The arguments of a search of one mailbox. */
+  interface SearchArgs {
+    query: string;
+    max_results: number;
+    page_token?: string;
+    detail: SearchDetail;
+  }
+
+  /** Searches one mailbox, and returns the matching threads as a search result gives them. */
+  const searchThreads = async (a: Account, args: SearchArgs) => {
+    const list = await gmail<{ threads?: { id: string }[]; nextPageToken?: string }>(env, a, "/threads", {
+      query: { q: args.query, maxResults: String(args.max_results), pageToken: args.page_token },
+    });
+    const [{ byId }, { threads }] = await Promise.all([
+      labelMap(env, a),
+      readThreads(a, (list.threads ?? []).map((t) => t.id), SEARCH_HEADERS),
+    ]);
+    return { threads: threads.map((t) => threadRow(t, byId, args.detail)), next_page_token: list.nextPageToken ?? null };
+  };
+
+  /** The input of a tool that searches threads, other than the account. */
+  const searchInput = {
+    query: z.string().default("in:inbox").describe("A Gmail search query"),
+    max_results: z.number().int().min(1).max(50).default(20),
+    detail: z
+      .enum(["compact", "full"])
+      .default("compact")
+      .describe(
+        "compact gives the ID, sender, subject, date, snippet, labels, unread state and number of messages of each thread. " +
+          "full also gives the To and Cc of the latest message, its message_id, and each sender in the thread.",
+      ),
+  };
+
   server.registerTool(
     "list_accounts",
     {
@@ -351,44 +486,18 @@ export function buildServer(
       title: "Search threads",
       description:
         "Search one mailbox with Gmail search syntax, for example `in:inbox newer_than:1d`, `is:unread from:alice` or `label:Agent/Action`. " +
-        "For each thread, the result has the sender, subject, date, snippet and labels of the latest message. " +
+        "For each thread, the result has the sender, subject, date and snippet of the latest message, and the labels of the thread. " +
+        "date is the time that Gmail received the latest message, in UTC. " +
         CONTENT_IS_DATA,
       inputSchema: {
         account: z.string().describe("The address of the mailbox, from list_accounts"),
-        query: z.string().default("in:inbox").describe("A Gmail search query"),
-        max_results: z.number().int().min(1).max(50).default(20),
+        ...searchInput,
         page_token: z.string().optional().describe("The next_page_token from the previous result"),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async (a, args: { account: string; query: string; max_results: number; page_token?: string }) => {
-      const list = await gmail<{ threads?: { id: string }[]; nextPageToken?: string; resultSizeEstimate?: number }>(
-        env,
-        a,
-        "/threads",
-        { query: { q: args.query, maxResults: String(args.max_results), pageToken: args.page_token } },
-      );
-      const ids = list.threads ?? [];
-      const { byId } = await labelMap(env, a);
-      const threads = await Promise.all(
-        ids.map(async ({ id }) => {
-          const t = await gmail<GmailThread>(env, a, `/threads/${id}`, {
-            query: { format: "metadata", metadataHeaders: ["From", "To", "Cc", "Subject", "Date"] },
-          });
-          const msgs = t.messages ?? [];
-          const last = msgs[msgs.length - 1];
-          const allLabels = new Set(msgs.flatMap((m) => m.labelIds ?? []));
-          return {
-            thread_id: t.id,
-            message_count: msgs.length,
-            participants: [...new Set(msgs.map((m) => header(m.payload?.headers, "From")).filter(Boolean))],
-            latest: last ? summarise(last, byId) : null,
-            thread_labels: [...allLabels].map((id) => byId.get(id) ?? id),
-          };
-        }),
-      );
-      return text({ account: a.email, query: args.query, threads, next_page_token: list.nextPageToken ?? null });
-    },
+    async (a, args: SearchArgs & { account: string }) =>
+      text({ account: a.email, query: args.query, ...(await searchThreads(a, args)) }),
   );
 
   accountTool(
@@ -674,47 +783,6 @@ export function buildServer(
     return { body: { addLabelIds, removeLabelIds }, notFound };
   };
 
-  /**
-   * Makes one Gmail call for each of many threads, with Gmail batch requests. `call` gives the call
-   * for a thread. Tries each call that Gmail limits or that fails on the Gmail side again, after a
-   * pause. Returns the answer of Gmail for each thread that succeeded, and the error of each thread
-   * that failed. `notFound` has the threads that Gmail did not find.
-   */
-  const eachThread = async (
-    a: Account,
-    threadIds: string[],
-    call: (id: string) => BatchCall,
-  ): Promise<{ done: Map<string, unknown>; failed: { thread_id: string; error: string }[]; notFound: string[] }> => {
-    let pending = [...new Set(threadIds)];
-    const done = new Map<string, unknown>();
-    const failed = new Map<string, { status: number; error: string }>();
-    for (let attempt = 0; attempt <= BATCH_RETRIES && pending.length; attempt++) {
-      if (attempt > 0) await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
-      const retry: string[] = [];
-      for (let i = 0; i < pending.length; i += BATCH_SIZE) {
-        const ids = pending.slice(i, i + BATCH_SIZE);
-        const results = await gmailBatch(env, a, ids.map(call));
-        results.forEach((r, j) => {
-          const id = ids[j]!;
-          if (!r.error) {
-            done.set(id, r.body);
-            failed.delete(id);
-            return;
-          }
-          failed.set(id, { status: r.status, error: r.error });
-          if (r.status === 0 || r.status === 429 || r.status >= 500) retry.push(id);
-        });
-      }
-      pending = retry;
-    }
-    const all = [...failed];
-    return {
-      done,
-      failed: all.filter(([, f]) => f.status !== 404).map(([thread_id, f]) => ({ thread_id, error: f.error })),
-      notFound: all.filter(([, f]) => f.status === 404).map(([id]) => id),
-    };
-  };
-
   /** Returns the call that changes the labels of one thread, for eachThread. */
   const modifyCall =
     (body: { addLabelIds: string[]; removeLabelIds: string[] }) =>
@@ -785,12 +853,12 @@ export function buildServer(
     CONTENT_IS_DATA;
 
   /** Returns a short description of one thread, for a preview. */
-  const previewOf = (id: string, t: GmailThread) => {
+  const previewOf = (t: GmailThread) => {
     const msgs = t.messages ?? [];
     const last = msgs[msgs.length - 1];
     const h = last?.payload?.headers;
     return {
-      thread_id: id,
+      thread_id: t.id,
       from: header(h, "From") ?? null,
       subject: header(h, "Subject") ?? null,
       date: header(h, "Date") ?? null,
@@ -836,12 +904,9 @@ export function buildServer(
       }
 
       const { ids, more = false } = await work.select(a, args);
-      const { done, failed, notFound } = await eachThread(a, ids, (id) => ({
-        method: "GET",
-        path: `/threads/${encodeURIComponent(id)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
-      }));
-      // Keep the order of the selection.
-      const threads = ids.filter((id) => done.has(id)).map((id) => previewOf(id, done.get(id) as GmailThread));
+      const read = await readThreads(a, ids, ["From", "Subject", "Date"]);
+      const { failed, notFound } = read;
+      const threads = read.threads.map(previewOf);
       const extra = {
         ...(more ? { more_matches: true } : {}),
         ...(notFound.length ? { not_found: notFound } : {}),
@@ -1053,7 +1118,9 @@ export function buildServer(
         WRITE_RULE,
       inputSchema: {
         account: z.string(),
-        message_id: z.string().describe("The message_id of the message to forward, from get_thread or search_threads"),
+        message_id: z
+          .string()
+          .describe("The message_id of the message to forward, from get_thread, or from search_threads with detail full"),
         to: z.string().describe("The recipients, separated by commas"),
         cc: z.string().optional(),
         note: z.string().optional().describe("Plain text above the forwarded message"),
