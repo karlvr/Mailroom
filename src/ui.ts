@@ -152,6 +152,7 @@ input[type=checkbox]{flex:none;width:18px;height:18px;margin:0;accent-color:var(
 .who{flex:1 1 220px;min-width:0;display:flex;flex-direction:column;line-height:1.35}
 .who b{font-size:16px}
 .who span{font:12.5px var(--mono);color:var(--muted);overflow-wrap:anywhere}
+.who .usage{margin-top:4px;font-family:var(--sans)}
 .pills{display:flex;flex-wrap:wrap;gap:8px}
 .chev{position:absolute;top:50%;right:12px;display:grid;place-items:center;width:44px;height:44px;margin-top:-22px;color:var(--muted)}
 .mbx[open] .chev svg{transform:rotate(180deg)}
@@ -1129,7 +1130,7 @@ export function dashboardPage(
     };
     return `<details class="mbx" id="mbx-${id}"${opened(m) ? " open" : ""}>
 <summary><span class="id${m.status === "ok" ? "" : " warn"}">${mailboxId(i + 1)}</span>
-<span class="who"><b>${esc(m.name || m.email)}</b>${m.name ? `<span>${esc(m.email)}</span>` : ""}<span>${usageLine(usage.get(m.id), now)}</span></span>
+<span class="who"><b>${esc(m.name || m.email)}</b>${m.name ? `<span>${esc(m.email)}</span>` : ""}<span class="usage">${usageLine(usage.get(m.id), now)}</span></span>
 <span class="pills">${needsSetup(m) ? `<span class="pill warn">Needs setup</span>` : ""}${
       m.status === "ok" ? `<span class="pill ok">Linked</span>` : `<span class="pill warn">${ICON.warn}Needs re-linking</span>`
     }${calendar ? `<span class="pill ok">Calendar</span>` : `<span class="pill">No calendar</span>`}${onPills || `<span class="pill">Sending off</span>`}${
