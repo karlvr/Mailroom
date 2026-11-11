@@ -19,11 +19,19 @@ export const TEST_ACCOUNT: Account = {
   updated_at: 0,
 };
 
-export const listAccounts = async (): Promise<Account[]> => [TEST_ACCOUNT];
+/** More accounts of the user, for the tools that work in every account. The tests add and remove them. */
+export const OTHER_ACCOUNTS: Account[] = [];
+
+export const listAccounts = async (): Promise<Account[]> => [TEST_ACCOUNT, ...OTHER_ACCOUNTS];
 export const findAccount = async (_env: unknown, _user: string, ref: string): Promise<Account | null> =>
-  ref.toLowerCase() === TEST_ACCOUNT.email ? TEST_ACCOUNT : null;
+  [TEST_ACCOUNT, ...OTHER_ACCOUNTS].find((a) => a.email === ref.toLowerCase()) ?? null;
 export const getGoogleConfig = async (): Promise<GoogleConfig> => ({ clientId: "client", clientSecret: "secret" }) as GoogleConfig;
-export const getRefreshToken = async (): Promise<string> => "refresh-token";
+
+/** Returns the refresh token of an account. Fails for an account with the status "relink", as for a token that cannot be decrypted. */
+export const getRefreshToken = async (_env: unknown, a: Account): Promise<string> => {
+  if (a.status === "relink") throw new Error("The token cannot be decrypted.");
+  return "refresh-token";
+};
 export const setAccountStatus = async (): Promise<void> => {};
 
 // The previews of the bulk tools, in memory, by token hash.

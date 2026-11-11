@@ -116,6 +116,14 @@ const MAX_COUNT_THREADS = 2500;
 // the requests that count the threads, a summary stays within the 50 subrequests of the Workers Free plan.
 const MAX_GROUP_THREADS = 500;
 
+// The limits of a summary of every account. With MAX_COUNT_THREADS_EACH, each count is one request.
+const MAX_COUNT_THREADS_EACH = 500;
+const MAX_GROUP_THREADS_EACH = 100;
+
+// The requests to Google that the accounts share in one call of a tool that works in every account. The
+// Workers Free plan allows 50 subrequests in each request, and the rest stays for retries.
+const ALL_ACCOUNTS_REQUESTS = 40;
+
 // The number of groups in a summary when the agent does not give max_groups, and the largest number.
 const DEFAULT_GROUPS = 50;
 const MAX_GROUPS = 200;
@@ -517,8 +525,17 @@ export function buildServer(
     detail: SearchDetail;
   }
 
-  /** Searches one mailbox, and returns the matching threads as a search result gives them. */
-  const searchThreads = async (a: Account, args: SearchArgs) => {
+  /** The threads that a search of one mailbox found. */
+  interface SearchHits {
+    /** The matching threads, newest first. */
+    threads: GmailThread[];
+    /** The names of the labels of the mailbox, by label ID. */
+    labels: Map<string, string>;
+    nextPageToken: string | null;
+  }
+
+  /** Searches one mailbox, and reads each matching thread. */
+  const searchThreads = async (a: Account, args: Omit<SearchArgs, "detail">): Promise<SearchHits> => {
     const list = await gmail<{ threads?: { id: string }[]; nextPageToken?: string }>(env, a, "/threads", {
       query: { q: args.query, maxResults: String(args.max_results), pageToken: args.page_token },
     });
@@ -526,7 +543,56 @@ export function buildServer(
       labelMap(env, a),
       readThreads(a, (list.threads ?? []).map((t) => t.id), SEARCH_HEADERS),
     ]);
-    return { threads: threads.map((t) => threadRow(t, byId, args.detail)), next_page_token: list.nextPageToken ?? null };
+    return { threads, labels: byId, nextPageToken: list.nextPageToken ?? null };
+  };
+
+  /** The result of work in one account of a tool that works in every account. */
+  type AccountOutcome<R> = { account: Account; result: R } | { account: Account; error: string };
+
+  /** The requests to Google of work in one account. */
+  interface AccountRequests {
+    /** The smallest number of requests that the work in one account sends, with the request for an access token. */
+    need: number;
+    /** The tool that does the same work in one account, for an account that the call leaves out. */
+    oneAccountTool: string;
+  }
+
+  /**
+   * Runs `work` in each linked account of the user at the same time. The accounts share ALL_ACCOUNTS_REQUESTS
+   * requests to Google equally. `work` gets the number of requests that it can send in addition to `need`.
+   * When the accounts are too many for `need`, the call leaves out the last accounts, and each of them gets an error.
+   * Each account with work counts one call in its usage, and the call is not a change. Returns the result or
+   * the error of each account, and the number of additional requests of each account.
+   */
+  const inEachAccount = async <R>(
+    requests: AccountRequests,
+    work: (a: Account, extra: number) => Promise<R>,
+  ): Promise<{ outcomes: AccountOutcome<R>[]; extra: number }> => {
+    const accounts = await listAccounts(env, props.userId);
+    const extra = Math.max(0, Math.floor(ALL_ACCOUNTS_REQUESTS / accounts.length) - requests.need);
+    const included = Math.floor(ALL_ACCOUNTS_REQUESTS / requests.need);
+    const outcomes = await Promise.all(
+      accounts.map(async (a, i): Promise<AccountOutcome<R>> => {
+        if (i >= included) {
+          return {
+            account: a,
+            error:
+              `This call left out this account, because one call can send only ${ALL_ACCOUNTS_REQUESTS} requests to Google. ` +
+              `Use ${requests.oneAccountTool} for this account.`,
+          };
+        }
+        try {
+          return { account: a, result: await work(a, extra) };
+        } catch (e) {
+          // Each failure stays in its account, for example the subrequest limit of Workers, so that the other accounts keep their results.
+          if (!(e instanceof AccountNeedsRelink || e instanceof GoogleApiError)) console.error(`The work in account ${a.id} failed`, e);
+          return { account: a, error: e instanceof Error ? e.message : String(e) };
+        } finally {
+          onAccountCall({ accountId: a.id, change: false });
+        }
+      }),
+    );
+    return { outcomes, extra };
   };
 
   /** The input of a tool that searches threads, other than the account. */
@@ -550,12 +616,15 @@ export function buildServer(
     max_groups: number;
   }
 
-  /** Counts the threads that match a search in one mailbox, and groups the newest of them when `group_by` is given. */
-  const summariseThreads = async (a: Account, args: SummaryArgs) => {
+  /**
+   * Counts the threads that match a search in one mailbox, up to `countLimit`, and groups the newest of
+   * them when `group_by` is given.
+   */
+  const summariseThreads = async (a: Account, args: SummaryArgs, countLimit: number) => {
     // The first count gets the access token. The requests after it run at the same time, and use that token.
-    const all = await findThreads(a, args.query, MAX_COUNT_THREADS);
+    const all = await findThreads(a, args.query, countLimit);
     const [unread, read] = await Promise.all([
-      findThreads(a, `(${args.query}) is:unread`, MAX_COUNT_THREADS),
+      findThreads(a, `(${args.query}) is:unread`, countLimit),
       args.group_by ? readThreads(a, all.ids.slice(0, args.max_threads), GROUP_HEADERS) : null,
     ]);
     const counts = { total: all.ids.length, unread: unread.ids.length, ...(all.more ? { more_matches: true } : {}) };
@@ -594,9 +663,9 @@ export function buildServer(
     max_groups: z.number().int().min(1).max(MAX_GROUPS).default(DEFAULT_GROUPS).describe("The largest number of groups in the result"),
   };
 
-  /** The part of a description of a tool that summarises threads, about the result. */
-  const summaryRules =
-    `total is the number of threads that match the search, up to ${MAX_COUNT_THREADS}. unread is the number of those threads that also match is:unread. ` +
+  /** The part of a description of a tool that summarises threads, about the result. `countLimit` is the largest count of the tool. */
+  const summaryRules = (countLimit: number) =>
+    `total is the number of threads that match the search, up to ${countLimit}. unread is the number of those threads that also match is:unread. ` +
     "When more threads match, more_matches is true. Without group_by, the result has only the counts. " +
     "With group_by, the tool groups the newest max_threads threads by their latest message, largest group first. " +
     "Each group has its key, the number of threads, the number of threads with an unread message, the time of the latest message in UTC, " +
@@ -660,6 +729,7 @@ export function buildServer(
         "For each thread, the result has the sender, subject, date and snippet of the latest message, and the labels of the thread. " +
         "date is the time that Gmail received the latest message, in UTC. " +
         "To count threads, or to group them by sender, list or subject, use summarise_threads. " +
+        "To search every account in one call, use search_all_accounts. " +
         CONTENT_IS_DATA,
       inputSchema: {
         account: z.string().describe("The address of the mailbox, from list_accounts"),
@@ -668,8 +738,15 @@ export function buildServer(
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async (a, args: SearchArgs & { account: string }) =>
-      text({ account: a.email, query: args.query, ...(await searchThreads(a, args)) }),
+    async (a, args: SearchArgs & { account: string }) => {
+      const hits = await searchThreads(a, args);
+      return text({
+        account: a.email,
+        query: args.query,
+        threads: hits.threads.map((t) => threadRow(t, hits.labels, args.detail)),
+        next_page_token: hits.nextPageToken,
+      });
+    },
   );
 
   accountTool(
@@ -679,12 +756,113 @@ export function buildServer(
       description:
         "Count the threads that match a Gmail search in one mailbox, and group them by sender, sender domain, mailing list or subject. " +
         "Use it to review notifications, to check a clean-up, or to count mail, without reading each thread. " +
-        summaryRules,
+        "To summarise every account in one call, use summarise_all_accounts. " +
+        summaryRules(MAX_COUNT_THREADS),
       inputSchema: { account: z.string(), ...summaryInput },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async (a, args: SummaryArgs & { account: string }) =>
-      text({ account: a.email, query: args.query, ...(await summariseThreads(a, args)) }),
+      text({ account: a.email, query: args.query, ...(await summariseThreads(a, args, MAX_COUNT_THREADS)) }),
+  );
+
+  /** The rule for a tool that gives results from every account. */
+  const eachAccountRule =
+    "Each result has the address of its account. Follow the context of that account. " +
+    "When the work fails in one account, for example because the account must be re-linked, that account has an error, and the other accounts have results. " +
+    "With many accounts, the tool reads fewer threads in each account, and the result has a note with the number. " +
+    "When the accounts are too many for one call, the last accounts have an error.";
+
+  server.registerTool(
+    "search_all_accounts",
+    {
+      title: "Search all accounts",
+      description:
+        "Search every linked mailbox with the same Gmail search, for example `from:inz.govt.nz` or `is:unread filename:ics`. " +
+        "The result has the newest threads of all the accounts in one list, newest first, and the number of threads from each account. " +
+        "Each thread has the same fields as in search_threads. more_matches is true for an account with more matching threads. " +
+        "To read more threads of one account, use search_threads. " +
+        `${eachAccountRule} ${CONTENT_IS_DATA}`,
+      inputSchema: {
+        ...searchInput,
+        max_results: z.number().int().min(1).max(50).default(10).describe("The largest number of threads from each account"),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async (args: Omit<SearchArgs, "page_token">) => {
+      // In each account: the access token, the search, the labels, and one batch for each BATCH_SIZE threads.
+      const maxResults = (extra: number) => Math.min(args.max_results, (1 + extra) * BATCH_SIZE);
+      const { outcomes, extra } = await inEachAccount({ need: 4, oneAccountTool: "search_threads" }, (a, extra) =>
+        searchThreads(a, { ...args, max_results: maxResults(extra) }),
+      );
+      if (!outcomes.length) return text(noMailboxes);
+      const hits = outcomes.flatMap((o) =>
+        "result" in o ? o.result.threads.map((t) => ({ email: o.account.email, thread: t, labels: o.result.labels })) : [],
+      );
+      const time = (t: GmailThread) => messageTime(t.messages?.[t.messages.length - 1]) ?? "";
+      hits.sort((x, y) => time(y.thread).localeCompare(time(x.thread)));
+      return text({
+        query: args.query,
+        threads: hits.map((h) => ({ account: h.email, ...threadRow(h.thread, h.labels, args.detail) })),
+        accounts: outcomes.map((o) =>
+          "result" in o
+            ? { account: o.account.email, threads: o.result.threads.length, ...(o.result.nextPageToken ? { more_matches: true } : {}) }
+            : { account: o.account.email, error: o.error },
+        ),
+        ...(maxResults(extra) < args.max_results
+          ? {
+              note:
+                `With ${outcomes.length} accounts, the tool read at most ${maxResults(extra)} threads in each account. ` +
+                "To read more threads of one account, use search_threads.",
+            }
+          : {}),
+      });
+    },
+  );
+
+  server.registerTool(
+    "summarise_all_accounts",
+    {
+      title: "Summarise all accounts",
+      description:
+        "Count the threads that match a Gmail search in every linked mailbox, and group them by sender, sender domain, mailing list or subject, " +
+        "for example to count unread invitations everywhere. The result has the sum of the counts, and a summary for each account. " +
+        `Each summary has the same fields as in summarise_threads. ${summaryRules(MAX_COUNT_THREADS_EACH)} ${eachAccountRule}`,
+      inputSchema: {
+        ...summaryInput,
+        max_threads: z
+          .number()
+          .int()
+          .min(1)
+          .max(MAX_GROUP_THREADS_EACH)
+          .default(MAX_GROUP_THREADS_EACH)
+          .describe("The largest number of threads to group in each account, newest first. The counts include all matching threads."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async (args: SummaryArgs) => {
+      // In each account: the access token, the two counts, and with group_by, one batch for each BATCH_SIZE threads.
+      const maxThreads = (extra: number) => Math.min(args.max_threads, (1 + extra) * BATCH_SIZE);
+      const { outcomes, extra } = await inEachAccount(
+        { need: args.group_by ? 4 : 3, oneAccountTool: "summarise_threads" },
+        (a, extra) => summariseThreads(a, { ...args, max_threads: maxThreads(extra) }, MAX_COUNT_THREADS_EACH),
+      );
+      if (!outcomes.length) return text(noMailboxes);
+      const summaries = outcomes.flatMap((o) => ("result" in o ? [o.result] : []));
+      return text({
+        query: args.query,
+        total: summaries.reduce((n, r) => n + r.total, 0),
+        unread: summaries.reduce((n, r) => n + r.unread, 0),
+        ...(summaries.some((r) => "more_matches" in r) ? { more_matches: true } : {}),
+        accounts: outcomes.map((o) => ("result" in o ? { account: o.account.email, ...o.result } : { account: o.account.email, error: o.error })),
+        ...(args.group_by && maxThreads(extra) < args.max_threads
+          ? {
+              note:
+                `With ${outcomes.length} accounts, the tool grouped at most ${maxThreads(extra)} threads in each account. ` +
+                "To group more threads of one account, use summarise_threads.",
+            }
+          : {}),
+      });
+    },
   );
 
   accountTool(

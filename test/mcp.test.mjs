@@ -1,6 +1,6 @@
 // Tests of the MCP tools: the bulk thread tools and send_draft. The test bundles the real src/mcp.ts with esbuild, replaces the D1
 // parts of src/db.ts with test/support/db-stub.ts, and answers the Google requests with a fake Gmail.
-import { after, before, beforeEach, describe, test } from "node:test";
+import { after, afterEach, before, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -20,7 +20,7 @@ before(async () => {
       contents: `
         export { buildServer } from ${JSON.stringify(join(root, "src/mcp.ts"))};
         export { parseBatchResponse, batchRequestBody } from ${JSON.stringify(join(root, "src/google.ts"))};
-        export { TEST_ACCOUNT } from ${JSON.stringify(join(root, "test/support/db-stub.ts"))};
+        export { TEST_ACCOUNT, OTHER_ACCOUNTS } from ${JSON.stringify(join(root, "test/support/db-stub.ts"))};
         export { addressList } from ${JSON.stringify(join(root, "src/mime.ts"))};
         export { Client } from "@modelcontextprotocol/sdk/client/index.js";
         export { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -72,6 +72,8 @@ class FakeGmail {
     this.mailThreads = new Map();
     /** The IDs of the drafts that Gmail sent. */
     this.sent = [];
+    /** The number of requests that the fake got, as Workers counts subrequests. */
+    this.requests = 0;
     this.tokenRequests = 0;
     this.tokens = 0;
     /** The access tokens that this fake issued. Like Google, it accepts each of them. */
@@ -120,6 +122,7 @@ class FakeGmail {
   }
 
   async fetch(input, init = {}) {
+    this.requests++;
     const url = new URL(input instanceof URL || typeof input === "string" ? input : input.url);
     const method = init.method ?? "GET";
     if (url.href === "https://oauth2.googleapis.com/token") {
@@ -594,6 +597,97 @@ describe("summarise_threads", () => {
     assert.equal(r.groups.length, 1);
     assert.deepEqual(r.groups.map((g) => g.key), ["notifications@github.com"]);
     assert.deepEqual(r.other_groups, { groups: 1, threads: 1 });
+  });
+});
+
+describe("tools for every account", () => {
+  beforeEach(() => {
+    gmail.threads.get("t2").date = "Wed, 11 Nov 2026 09:00:00 +1300";
+    mod.OTHER_ACCOUNTS.push(
+      { ...mod.TEST_ACCOUNT, id: "acct-2", email: "two@example.com" },
+      { ...mod.TEST_ACCOUNT, id: "acct-3", email: "old@example.com", status: "relink" },
+    );
+  });
+  afterEach(() => {
+    mod.OTHER_ACCOUNTS.length = 0;
+  });
+
+  /** Calls a tool without an account, and returns its JSON result. */
+  const callAll = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+  test("search_all_accounts gives the newest threads of all accounts in one list", async () => {
+    const r = await callAll("search_all_accounts", { query: failures, max_results: 2 });
+    assert.deepEqual(
+      r.threads.map((t) => [t.account, t.thread_id, t.date]),
+      [
+        ["me@example.com", "t2", "2026-11-10T20:00:00Z"],
+        ["two@example.com", "t2", "2026-11-10T20:00:00Z"],
+        ["me@example.com", "t0", "2026-11-09T20:00:00Z"],
+        ["two@example.com", "t0", "2026-11-09T20:00:00Z"],
+      ],
+    );
+    assert.equal(r.accounts.length, 3);
+    assert.deepEqual(r.accounts.slice(0, 2), [
+      { account: "me@example.com", threads: 2, more_matches: true },
+      { account: "two@example.com", threads: 2, more_matches: true },
+    ]);
+    assert.match(r.accounts[2].error, /old@example.com cannot be decrypted/);
+    assert.deepEqual(calls.map((c) => c.accountId).sort(), ["acct-1", "acct-2", "acct-3"]);
+    assert.ok(calls.every((c) => !c.change));
+  });
+
+  test("summarise_all_accounts adds the counts of the accounts", async () => {
+    gmail.threads.get("t0").labels.add("UNREAD");
+    const r = await callAll("summarise_all_accounts", { query: failures, group_by: "sender" });
+    assert.equal(r.total, 60);
+    assert.equal(r.unread, 2);
+    assert.deepEqual(r.accounts[0].groups.map((g) => [g.key, g.threads]), [["monitor@example.com", 30]]);
+    assert.ok(r.accounts[2].error);
+    assert.equal(r.note, undefined);
+  });
+
+  /** Adds linked accounts, so that the user has `count` accounts in all. */
+  const addAccounts = (count) => {
+    for (let i = mod.OTHER_ACCOUNTS.length + 2; i <= count; i++) {
+      mod.OTHER_ACCOUNTS.push({ ...mod.TEST_ACCOUNT, id: `acct-${i}`, email: `a${i}@example.com` });
+    }
+  };
+
+  test("search_all_accounts shares the requests to Google among many accounts, and leaves out the accounts after them", async () => {
+    addAccounts(12);
+    const r = await callAll("search_all_accounts", { query: "in:inbox", max_results: 50 });
+    assert.ok(gmail.requests <= 50, `${gmail.requests} requests`);
+    assert.equal(r.accounts[0].threads, 25);
+    assert.match(r.note, /^With 12 accounts, the tool read at most 25 threads in each account/);
+    assert.deepEqual(
+      r.accounts.slice(10).map((a) => a.account),
+      ["a11@example.com", "a12@example.com"],
+    );
+    assert.ok(r.accounts.slice(10).every((a) => /left out this account.*search_threads/.test(a.error)));
+    assert.ok(!calls.some((c) => c.accountId === "acct-11" || c.accountId === "acct-12"));
+  });
+
+  test("summarise_all_accounts groups fewer threads in each of many accounts", async () => {
+    addAccounts(7);
+    const r = await callAll("summarise_all_accounts", { query: "in:inbox", group_by: "sender" });
+    assert.ok(gmail.requests <= 50, `${gmail.requests} requests`);
+    assert.equal(r.accounts[0].total, 60);
+    assert.equal(r.accounts[0].grouped_threads, 50);
+    assert.match(r.note, /^With 7 accounts, the tool grouped at most 50 threads in each account/);
+  });
+
+  test("a failure outside Google is the error of its account, not of the whole call", async () => {
+    // Workers fails each fetch after the subrequest limit in this way.
+    globalThis.fetch = async () => {
+      throw new Error("Too many subrequests.");
+    };
+    const res = await client.callTool({ name: "search_all_accounts", arguments: { query: failures } });
+    assert.ok(!res.isError);
+    const r = JSON.parse(res.content[0].text);
+    assert.deepEqual(r.accounts.slice(0, 2), [
+      { account: "me@example.com", error: "Too many subrequests." },
+      { account: "two@example.com", error: "Too many subrequests." },
+    ]);
   });
 });
 

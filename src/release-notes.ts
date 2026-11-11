@@ -17,6 +17,7 @@ export const RELEASE_NOTES: ReleaseDay[] = [
   {
     date: "2026-11-11",
     changes: [
+      "An agent can search or summarise all your mailboxes in one step, for example to find every email from one sender.",
       "An agent can summarise a mailbox in one step: how many threads match a search, how many are unread, and which senders, lists or subjects they come from.",
     ],
   },
