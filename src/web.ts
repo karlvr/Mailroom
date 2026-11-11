@@ -5,12 +5,16 @@ import {
   type AccountPermissions,
   type ContextSubject,
   GLOBAL_CONTEXT,
+  GLOBAL_STATE,
+  type StateScope,
   accountUsage,
+  allState,
   contextHistory,
   contextSummaries,
   decideProposal,
   MAX_CONTEXT_CHARS,
   deleteAccount,
+  deleteState,
   findAccount,
   getAllowlist,
   getConfig,
@@ -162,6 +166,9 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
     if (path === "/authorize") return authorize(req, env, app);
     const m = path.match(/^\/accounts\/([\w-]+)(\/remove)?$/);
     if (m && method === "POST") return accountPost(req, env, ctx, m[1], !!m[2]);
+    // The notes of a mailbox are at /accounts/{id}/state, and the global notes at /state.
+    const state = path.match(/^(?:\/accounts\/([\w-]+))?\/state\/delete$/);
+    if (state && method === "POST") return statePost(req, env, state[1] ? { kind: "account", accountId: state[1] } : GLOBAL_STATE);
     // The routes of the global context start with /context. The routes of the context of a mailbox
     // start with /accounts/{id}/context.
     const context = path.match(/^(?:\/accounts\/([\w-]+))?\/context(\/.*)?$/);
@@ -199,17 +206,19 @@ async function home(req: Request, env: Env, origin: string, app: string) {
   const accounts = await listAccounts(env, session.userId);
   const contexts = await contextSummaries(env, session.userId);
   const usage = await accountUsage(env, session.userId);
+  const notes = await allState(env, session.userId);
   const setupOutdated = (await getSetupVersion(env)) < SETUP_VERSION;
   // The warning is not essential, so the page shows without it when Mailroom cannot list the connections.
   const outdated = await outdatedConnections(env, session.userId).catch((e) => {
     console.error("Mailroom could not list the outdated agent connections", e);
     return [];
   });
-  return dashboardPage(app, session.email, accounts, contexts, usage, session.csrf, {
+  return dashboardPage(app, session.email, accounts, contexts, usage, notes, session.csrf, {
     messages,
     setupOutdated,
     outdatedConnections: outdated,
     linkedMailbox: params.get("mailbox") ?? undefined,
+    openSection: params.get("open") ?? undefined,
   });
 }
 
@@ -425,6 +434,22 @@ async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: st
     },
   }, session.email);
   return redirect(withMessages("/", "saved"));
+}
+
+/** Deletes one agent note of a scope, or all of them, and shows the scope open on the Mailboxes page. */
+async function statePost(req: Request, env: Env, scope: StateScope) {
+  const session = await getUserSession(env, req);
+  if (!session) return redirect("/");
+  const f = await form(req);
+  const open = `/?open=${encodeURIComponent(scope.kind === "global" ? "global" : scope.accountId)}`;
+  if (!checkCsrf(f, session.csrf)) return redirect(withMessages(open, "form-expired"));
+  // The notes of each user are apart, so a scope of another user deletes nothing.
+  if (f.get("all") === "1") {
+    await deleteState(env, session.userId, scope, "all");
+    return redirect(withMessages(open, "notes-deleted"));
+  }
+  await deleteState(env, session.userId, scope, [String(f.get("key") ?? "")]);
+  return redirect(withMessages(open, "note-deleted"));
 }
 
 // ---------- context history ----------

@@ -904,12 +904,20 @@ export async function deleteState(env: Env, userId: string, scope: StateScope, k
   return results.reduce((n, r) => n + r.meta.changes, 0);
 }
 
-/** Returns the notes of the user that did not expire: the global notes, and the notes of each account by account ID. */
-export async function allState(env: Env, userId: string): Promise<{ global: StateNote[]; accounts: Map<string, StateNote[]> }> {
+/** The notes of a user that did not expire. */
+export interface AgentNotes {
+  /** The global notes. */
+  global: StateNote[];
+  /** The notes of each account, by account ID. An account without notes has no entry. */
+  accounts: Map<string, StateNote[]>;
+}
+
+/** Returns the notes of the user that did not expire. */
+export async function allState(env: Env, userId: string): Promise<AgentNotes> {
   const { results } = await env.DB.prepare("SELECT * FROM agent_state WHERE user_id = ? AND expires_at > ? ORDER BY key")
     .bind(userId, Date.now())
     .all<StateRow>();
-  const out = { global: [] as StateNote[], accounts: new Map<string, StateNote[]>() };
+  const out: AgentNotes = { global: [], accounts: new Map() };
   for (const r of results) {
     if (r.account_id === "") out.global.push(toNote(r));
     else out.accounts.set(r.account_id, [...(out.accounts.get(r.account_id) ?? []), toNote(r)]);

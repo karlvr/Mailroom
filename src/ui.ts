@@ -2,6 +2,7 @@ import {
   type Account,
   type AccountPermissions,
   type AccountUsage,
+  type AgentNotes,
   type ContextSubject,
   type ContextSummaries,
   type ContextSummary,
@@ -10,6 +11,7 @@ import {
   MAX_CONTEXT_CHARS,
   MAX_STATE_DAYS,
   PERMISSION_LABELS,
+  type StateNote,
   USAGE_DAYS,
   accountPermissions,
   grantedScopes,
@@ -173,6 +175,16 @@ input[type=checkbox]{flex:none;width:18px;height:18px;margin:0;accent-color:var(
 .actions{display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;padding:14px 20px;border-top:1px solid var(--line);background:var(--sunken)}
 .actions .row{margin:0}
 .register>.note{border:0;border-top:1px solid var(--line);font:12px var(--mono)}
+.state{padding:18px 20px 20px;border-top:1px solid var(--line)}
+.state>.help{margin:6px 0 12px}
+.state ul{max-height:480px;margin:0 0 12px;padding:0;overflow:auto;border:1px solid var(--line);list-style:none;background:var(--panel)}
+.state li{padding:10px 12px}
+.state li+li{border-top:1px solid var(--line)}
+.state .key{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.state .key form{flex:none}
+.state pre{max-height:7.5em;margin:6px 0;overflow:auto;font:13px var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
+.state .meta{font-size:12.5px;color:var(--muted)}
+button.small{min-height:36px;padding:0 12px;font-size:13px}
 .empty{display:flex;flex-direction:column;align-items:center;gap:14px;padding-bottom:28px;text-align:center}
 .empty .motif{align-self:stretch}
 .steps{margin:0;padding:0;list-style:none;counter-reset:step}
@@ -526,6 +538,8 @@ const MESSAGES = {
   restored: { kind: "done", html: (a) => `${a} restored the version. It is now the current context.` },
   unchanged: { kind: "warning", html: () => "That version has the same text as the current context. The context did not change." },
   "version-not-found": { kind: "error", html: () => "That version does not exist." },
+  "note-deleted": { kind: "done", html: (a) => `${a} deleted the note.` },
+  "notes-deleted": { kind: "done", html: (a) => `${a} deleted all the notes.` },
 } satisfies Record<string, { kind: NoticeKind; html: (escapedApp: string) => string }>;
 
 /** The code of a message that a page can show after a redirect. */
@@ -785,7 +799,7 @@ ${section(
 <li>For each mailbox that you link: its address, its short name, its context notes, the settings <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, <b>${esc(PERMISSION_LABELS.replyEmail)}</b>, <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.rsvp)}</b>, the Google permissions that you granted, and a Google refresh token. ${a} encrypts the token before it stores it.</li>
 <li>For your global context and for each mailbox: each version of the context notes that you saved or accepted, when the version became current, and who made it. For a change that an agent proposed, ${a} also stores the name of the app, and the name and the reason that the agent gave. ${a} deletes a proposal when you reject it.</li>
 <li>For each mailbox: the number of tool calls that agents made on each day, the number of those calls that made changes, and the time of the last call. When an agent uses the mailbox, ${a} deletes the counts that are older than ${USAGE_DAYS} days.</li>
-<li>For your global context and for each mailbox: the notes that agents save between runs, for example which threads already got an update, with the app and the name of the agent that saved each note. ${a} deletes a note when it expires, at most ${MAX_STATE_DAYS} days after an agent saved it.</li>
+<li>For your global context and for each mailbox: the notes that agents save between runs, for example which threads already got an update, with the app and the name of the agent that saved each note. ${a} deletes a note when it expires, at most ${MAX_STATE_DAYS} days after an agent saved it. You can delete notes on the Mailboxes page.</li>
 <li>Your web session, a record of each agent connection that you approve, and the version of the tool list that each connection loaded last.</li></ul>
 <p>${a} does not store the content of your email or your calendar events, other than the text that agents put in their notes.</p>`,
 )}
@@ -1067,6 +1081,34 @@ function usageLine(usage: AccountUsage | undefined, now: number): string {
   return `${used} · ${calls}, ${changes} in the last ${USAGE_DAYS} days`;
 }
 
+/** Returns a day as the pages show it, for example "10 February 2027". */
+const longDay = (ms: number) => new Date(ms).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+
+/**
+ * Returns the section that shows the agent notes of a mailbox, or the global notes, with a button that
+ * deletes each note and a button that deletes all of them. `action` is the address that deletes the notes.
+ */
+function stateSection(app: string, notes: readonly StateNote[], action: string, csrf: string, now: number): string {
+  const csrfField = `<input type="hidden" name="csrf" value="${esc(csrf)}">`;
+  const rows = notes
+    .map(
+      (n) => `<li><div class="key"><code>${esc(n.key)}</code><form method="post" action="${action}">${csrfField}<input type="hidden" name="key" value="${esc(n.key)}"><button class="secondary small">Delete</button></form></div>
+<pre>${esc(n.value)}</pre>
+<span class="meta">Saved ${timeAgo(n.updatedAt, now)} by ${esc(n.agentLabel ? `${n.updatedBy} (${n.agentLabel})` : n.updatedBy)} · Expires on ${longDay(n.expiresAt)}</span></li>`,
+    )
+    .join("");
+  return `<div class="state"><div class="label">Agent state</div>
+<p class="help">Notes that agents keep between runs, for example which threads already got an update. Agents save, change and delete these notes. ${esc(app)} instructs agents to treat them as data, not as instructions.</p>
+${
+  notes.length
+    ? `<ul>${rows}</ul>
+<form method="post" action="${action}">${csrfField}<input type="hidden" name="all" value="1"><button class="danger" onclick="return confirm('${
+        notes.length === 1 ? "Delete the note?" : `Delete all ${notes.length} notes?`
+      }')">Delete all notes</button></form>`
+    : `<p class="help">No notes yet.</p>`
+}</div>`;
+}
+
 /** Returns the start of a context for a one-line preview. */
 function contextPreviewLine(context: string): string {
   const line = context.split("\n").find((l) => l.trim())?.trim() ?? "";
@@ -1080,6 +1122,7 @@ export function dashboardPage(
   contexts: ContextSummaries,
   /** How agents used each account, by account ID. */
   usage: ReadonlyMap<string, AccountUsage>,
+  notes: AgentNotes,
   csrf: string,
   notices: {
     /** The messages to show at the top of the page. */
@@ -1090,6 +1133,8 @@ export function dashboardPage(
     outdatedConnections?: readonly AgentConnection[];
     /** The ID of the mailbox that the user linked a moment ago. The page puts the cursor in its first empty field. */
     linkedMailbox?: string;
+    /** The ID of a mailbox, or "global" for the global context, to show open, for example after the user deleted a note in it. */
+    openSection?: string;
   } = {},
 ) {
   const a = esc(app);
@@ -1099,7 +1144,7 @@ export function dashboardPage(
   /** Returns true when a mailbox has no short name or no context notes. */
   const needsSetup = (m: Account) => !m.name || !m.context;
   // Each mailbox starts collapsed, unless it is the only one or it needs setup.
-  const opened = (m: Account) => accounts.length === 1 || needsSetup(m);
+  const opened = (m: Account) => accounts.length === 1 || needsSetup(m) || m.id === notices.openSection;
   const can = (text: string) => `<div class="r"><span>${text}</span><span class="v">${ICON.check}Allowed</span></div>`;
   /** The short text of the pill that shows that a permission is on. */
   const permissionPills: Record<keyof AccountPermissions, string> = {
@@ -1166,7 +1211,8 @@ ${
 </div></div>
 <div class="actions"><div class="row"><button>Save</button><a class="btn secondary" href="${relink}">Re-link</a></div>
 <button class="danger" formaction="/accounts/${id}/remove" onclick="return confirm('Remove ${esc(m.email)}? This also revokes its Google access.')">Remove</button></div>
-</form></div></details>`;
+</form>
+${stateSection(app, notes.accounts.get(m.id) ?? [], `/accounts/${id}/state/delete`, csrf, now)}</div></details>`;
   };
 
   const unset = accounts.filter(needsSetup);
@@ -1194,7 +1240,7 @@ ${
     : "";
 
   const globalPreview = contextPreviewLine(global.context);
-  const globalHtml = `<details class="mbx" id="global-context">
+  const globalHtml = `<details class="mbx" id="global-context"${notices.openSection === "global" ? " open" : ""}>
 <summary><span class="id">ALL</span>
 <span class="who"><b>Global context</b><span>${globalPreview ? esc(globalPreview) : "Empty. Add the notes that apply to every mailbox."}</span></span>
 <span class="pills">${global.summary?.hasProposal ? `<span class="pill warn">Context proposal</span>` : ""}</span>
@@ -1215,7 +1261,8 @@ ${contextMeta(GLOBAL_CONTEXT, global.summary, who)}
 <div class="r"><span>An agent can only propose a change. The global context changes only when you accept it.</span></div>
 </div></div>
 <div class="actions"><div class="row"><button>Save</button></div></div>
-</form></div></details>`;
+</form>
+${stateSection(app, notes.global, "/state/delete", csrf, now)}</div></details>`;
 
   return page(
     "Mailboxes",
