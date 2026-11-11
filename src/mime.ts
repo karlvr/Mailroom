@@ -227,3 +227,54 @@ export function buildMessage(m: NewMessage): string {
 
 /** Returns the message in the base64url form that the `raw` field of the Gmail API takes. */
 export const buildRawMessage = (m: NewMessage) => b64url(new TextEncoder().encode(buildMessage(m)));
+
+/** How Mailroom reads an attachment: as text, as HTML, as iCalendar data, or as a document that Workers AI converts. */
+export type AttachmentKind =
+  | { kind: "text" | "html" | "calendar" }
+  | {
+      kind: "document";
+      /** The file name for the conversion. It ends with the extension of the document type. */
+      name: string;
+      /** The media type of the document. */
+      type: string;
+    };
+
+// The document types that Workers AI converts to Markdown, by file extension.
+const DOCUMENT_TYPES: Record<string, string> = {
+  pdf: "application/pdf",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  odt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+};
+
+// The extensions of text files. A sender can give such a file a general media type, such as application/octet-stream.
+const TEXT_EXTENSIONS = new Set(["txt", "log", "csv", "tsv", "json", "xml", "md", "yaml", "yml"]);
+
+/**
+ * Returns how Mailroom reads an attachment, from its media type and its file name, or null when Mailroom
+ * cannot read it. The extension of the file name counts first, because senders often give a general media type.
+ */
+export function attachmentKind(mimeType: string, filename: string): AttachmentKind | null {
+  const type = mimeType.toLowerCase();
+  const ext = /\.([a-z0-9]+)$/i.exec(filename)?.[1]?.toLowerCase() ?? "";
+  if (ext === "ics" || type === "text/calendar" || type === "application/ics") return { kind: "calendar" };
+  if (ext === "html" || ext === "htm" || type === "text/html") return { kind: "html" };
+  const doc = DOCUMENT_TYPES[ext] ? ext : Object.keys(DOCUMENT_TYPES).find((e) => DOCUMENT_TYPES[e] === type);
+  if (doc) {
+    const base = filename.trim() || "attachment";
+    return { kind: "document", name: base.toLowerCase().endsWith(`.${doc}`) ? base : `${base}.${doc}`, type: DOCUMENT_TYPES[doc]! };
+  }
+  if (TEXT_EXTENSIONS.has(ext) || type.startsWith("text/") || type === "application/json" || type === "application/xml") return { kind: "text" };
+  return null;
+}
+
+/** Returns the part of a message with the part ID, or null when the message has no such part. */
+export function findPart(payload: GmailPart, partId: string): GmailPart | null {
+  if (payload.partId === partId) return payload;
+  for (const p of payload.parts ?? []) {
+    const hit = findPart(p, partId);
+    if (hit) return hit;
+  }
+  return null;
+}

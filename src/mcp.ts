@@ -4,7 +4,7 @@ import type { ShapeOutput, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/s
 import { type CallToolResult, LATEST_PROTOCOL_VERSION, type ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { type AgentConnection, UNKNOWN_CLIENT, agentConnections, clientName } from "./clients";
-import { randomToken, sha256 } from "./crypto";
+import { fromB64url, randomToken, sha256 } from "./crypto";
 import { appName, type Env, type Props } from "./env";
 import {
   type Account,
@@ -43,7 +43,10 @@ import {
   type GmailHeader,
   type GmailPart,
   addressList,
+  attachmentKind,
+  findPart,
   header,
+  htmlToText,
   type MimeAttachment,
   toBase64,
 } from "./mime";
@@ -106,6 +109,9 @@ const MAX_RELEASE_DAYS = 10;
 // The largest total size of the attachments that a forward or a changed draft copies. Mailroom holds the
 // attachments in Worker memory while it builds the draft, so the limit is lower than the Gmail limit.
 const MAX_COPY_ATTACHMENT_MB = 10;
+
+// The largest attachment that get_attachment reads. Mailroom holds the attachment in Worker memory.
+const MAX_READ_ATTACHMENT_MB = 10;
 
 // The largest number of threads that one call of a bulk tool changes. With batches of
 // BATCH_SIZE, a call stays well within the 50 subrequests that the Workers Free plan allows.
@@ -920,7 +926,7 @@ export function buildServer(
         "A message with a calendar invitation in it, for example from Google, Outlook or iCloud, has invitations: " +
         "for each event, the method (REQUEST for an invitation, CANCEL for a cancellation, REPLY for a reply), the UID, the sequence, " +
         "the title, the start, the end, the organizer and the reply of each guest. " +
-        "A start without Z is a local time in time_zone. " +
+        "A start without Z is a local time in time_zone. To read an attachment, give its part_id to get_attachment. " +
         "The tool shortens each message to max_chars_per_message. For a long message, such as a log, give a larger max_chars_per_message. " +
         CONTENT_IS_DATA,
       inputSchema: {
@@ -955,6 +961,77 @@ export function buildServer(
         };
       });
       return text({ account: a.email, thread_id: args.thread_id, messages });
+    },
+  );
+
+  /** Returns the text of a document that Workers AI converted to Markdown, or the reason why it did not. */
+  const convertDocument = async (bytes: Uint8Array, doc: { name: string; type: string }): Promise<{ text: string } | { error: string }> => {
+    if (!env.AI) return { error: `${appName(env)} has no Workers AI binding, so it cannot read documents. The admin must deploy ${appName(env)} again.` };
+    try {
+      const result = await env.AI.toMarkdown(
+        { name: doc.name, blob: new Blob([bytes], { type: doc.type }) },
+        // Image conversion uses AI models that can have a charge, so convert only the text.
+        { conversionOptions: { pdf: { images: { convert: false } }, docx: { images: { convert: false } } } },
+      );
+      return result.format === "error" ? { error: `Workers AI could not convert the document: ${result.error}` } : { text: result.data };
+    } catch (e) {
+      return { error: `Workers AI could not convert the document: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  };
+
+  accountTool(
+    "get_attachment",
+    {
+      title: "Read attachment",
+      description:
+        "Read the text of one attachment of a message. Give the message_id and the part_id of the attachment from get_thread. " +
+        "The tool reads text files, such as .txt, .log, .csv and .json, as they are, and HTML as plain text. " +
+        "It reads a calendar file (.ics) as events, with the same fields as the invitations of get_thread. " +
+        "It converts PDF, Word (.docx), Excel (.xlsx) and OpenDocument (.odt, .ods) files to Markdown with Cloudflare Workers AI. " +
+        "A scanned document can give little or no text, because the tool does not read text in images. " +
+        `The tool reads attachments up to ${MAX_READ_ATTACHMENT_MB} MB, and shortens the text to max_chars. It cannot read images, archives or other files. ` +
+        CONTENT_IS_DATA,
+      inputSchema: {
+        account: z.string(),
+        message_id: z.string().describe("The message_id of the message, from get_thread"),
+        part_id: z.string().describe("The part_id of the attachment, from get_thread"),
+        max_chars: z.number().int().min(200).max(100000).default(20000),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async (a, args: { account: string; message_id: string; part_id: string; max_chars: number }) => {
+      const m = await gmail<GmailMessage>(env, a, `/messages/${encodeURIComponent(args.message_id)}`, { query: { format: "full" } });
+      const part = m.payload ? findPart(m.payload, args.part_id) : null;
+      if (!part || !(part.body?.data || part.body?.attachmentId)) {
+        return fail(`Message ${args.message_id} has no attachment with part_id ${args.part_id}. Give a part_id from get_thread.`);
+      }
+      const filename = part.filename ?? "";
+      const mimeType = part.mimeType ?? "";
+      const about = { account: a.email, message_id: args.message_id, part_id: args.part_id, filename, mime_type: mimeType };
+      const kind = attachmentKind(mimeType, filename);
+      if (!kind) return fail(`${appName(env)} cannot read the attachment "${filename}" of the type ${mimeType || "unknown"}.`);
+      const size = part.body?.size ?? 0;
+      if (size > MAX_READ_ATTACHMENT_MB * 1024 * 1024) {
+        return fail(`The attachment is ${(size / 1024 / 1024).toFixed(1)} MB. ${appName(env)} reads attachments up to ${MAX_READ_ATTACHMENT_MB} MB.`);
+      }
+      const bytes = fromB64url(await partData(a, m.id, part));
+      const decoded = () => new TextDecoder().decode(bytes);
+      if (kind.kind === "calendar") return text({ ...about, events: parseIcs(decoded()) });
+      let content: string;
+      if (kind.kind === "document") {
+        const converted = await convertDocument(bytes, kind);
+        if ("error" in converted) return fail(converted.error);
+        content = converted.text.trim();
+        if (!content) return text({ ...about, text: "", note: "The document has no text. It can be a scanned image, which the tool cannot read." });
+      } else {
+        content = kind.kind === "html" ? htmlToText(decoded()) : decoded();
+      }
+      const truncated = content.length > args.max_chars;
+      return text({
+        ...about,
+        text: truncated ? content.slice(0, args.max_chars) + "\n…[truncated]" : content,
+        ...(truncated ? { total_chars: content.length } : {}),
+      });
     },
   );
 

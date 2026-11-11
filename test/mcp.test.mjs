@@ -73,6 +73,8 @@ class FakeGmail {
     this.mailThreads = new Map();
     /** The IDs of the drafts that Gmail sent. */
     this.sent = [];
+    /** The content of attachments that Gmail stores apart from their message, in base64url, by attachment ID. */
+    this.attachments = new Map();
     /** The events of the primary calendar, and the query of each request for them. */
     this.events = [];
     this.eventQueries = [];
@@ -191,6 +193,8 @@ class FakeGmail {
       const id = decodeURIComponent(thread[1]);
       return Response.json({ id, messages: this.mailThreads.get(id).map((_, i) => this.mailMessage(id, i)) });
     }
+    const attachment = /^\/messages\/[^/]+\/attachments\/([^/]+)$/.exec(path);
+    if (attachment && method === "GET") return Response.json({ data: this.attachments.get(decodeURIComponent(attachment[1])) });
     const message = /^\/messages\/([^/]+)-(\d+)$/.exec(path);
     if (message && method === "GET") {
       const id = decodeURIComponent(message[1]);
@@ -287,13 +291,24 @@ class FakeGmail {
 let gmail;
 let calls;
 let client;
+/** The documents that the fake Workers AI converted, and its next result. */
+let conversions;
+let conversionResult;
 const realFetch = globalThis.fetch;
 
 beforeEach(async () => {
   gmail = new FakeGmail(60);
   globalThis.fetch = (input, init) => gmail.fetch(input, init);
   calls = [];
-  const env = { APP_NAME: "Mailroom" };
+  conversions = [];
+  conversionResult = { format: "markdown", data: "# Invoice\n\nTotal: $120, due 2026-12-01" };
+  const AI = {
+    async toMarkdown(doc, options) {
+      conversions.push({ name: doc.name, type: doc.blob.type, text: await doc.blob.text(), options });
+      return { id: "1", name: doc.name, mimeType: doc.blob.type, ...conversionResult };
+    },
+  };
+  const env = { APP_NAME: "Mailroom", AI };
   const server = mod.buildServer(env, { props: { userId: "user-1", email: "me@example.com" }, clientId: null }, "https://mailroom.test", (c) =>
     calls.push(c),
   );
@@ -879,6 +894,59 @@ describe("get_thread", () => {
   test("refuses a message of another thread", async () => {
     gmail.mailThreads.set("g2", [{ labels: [], headers: [], body: "other" }]);
     assert.match((await call("get_thread", { thread_id: "g1", message_id: "g2-0" })).text, /not in thread g1/);
+  });
+});
+
+describe("get_attachment", () => {
+  const data = (t) => Buffer.from(t).toString("base64url");
+
+  beforeEach(() => {
+    gmail.attachments.set("pdf", data("%PDF-1.7 bytes"));
+    gmail.attachments.set("log", data("line 1\nline 2\n".repeat(100)));
+    gmail.mailThreads.set("f1", [
+      {
+        labels: ["INBOX"],
+        headers: headers({ From: "billing@example.com", Subject: "Invoice" }),
+        payload: {
+          mimeType: "multipart/mixed",
+          parts: [
+            { partId: "0", mimeType: "text/plain", body: { data: data("See attached") } },
+            { partId: "1", mimeType: "application/octet-stream", filename: "INV-42.PDF", body: { attachmentId: "pdf", size: 14 } },
+            { partId: "2", mimeType: "application/octet-stream", filename: "backup.log", body: { attachmentId: "log", size: 1400 } },
+            { partId: "3", mimeType: "text/html", filename: "report.html", body: { data: data("<p>Done &amp; dusted</p>"), size: 24 } },
+            { partId: "4", mimeType: "text/calendar", filename: "invite.ics", body: { data: data("BEGIN:VEVENT\nSUMMARY:Call\nEND:VEVENT"), size: 36 } },
+            { partId: "5", mimeType: "image/png", filename: "logo.png", body: { attachmentId: "png", size: 10 } },
+            { partId: "6", mimeType: "application/pdf", filename: "huge.pdf", body: { attachmentId: "huge", size: 11 * 1024 * 1024 } },
+          ],
+        },
+      },
+    ]);
+  });
+
+  const read = (part_id, extra = {}) => call("get_attachment", { message_id: "f1-0", part_id, ...extra });
+
+  test("converts a PDF with Workers AI, by its extension, without image conversion", async () => {
+    const r = await read("1");
+    assert.equal(r.text, "# Invoice\n\nTotal: $120, due 2026-12-01");
+    assert.deepEqual(conversions.map((c) => [c.name, c.type, c.text]), [["INV-42.PDF", "application/pdf", "%PDF-1.7 bytes"]]);
+    assert.equal(conversions[0].options.conversionOptions.pdf.images.convert, false);
+  });
+
+  test("reads text, HTML and calendar files, and shortens long text", async () => {
+    const log = await read("2", { max_chars: 200 });
+    assert.equal(log.text, `${"line 1\nline 2\n".repeat(100).slice(0, 200)}\n…[truncated]`);
+    assert.equal(log.total_chars, 1400);
+    assert.equal((await read("3")).text, "Done & dusted");
+    assert.deepEqual((await read("4")).events.map((e) => e.summary), ["Call"]);
+    assert.deepEqual(conversions, []);
+  });
+
+  test("refuses images, large files and unknown parts, and reports a failed conversion", async () => {
+    assert.match((await read("5")).text, /cannot read the attachment "logo.png"/);
+    assert.match((await read("6")).text, /11.0 MB/);
+    assert.match((await read("9")).text, /no attachment with part_id 9/);
+    conversionResult = { format: "error", error: "Unsupported file" };
+    assert.match((await read("1")).text, /could not convert the document: Unsupported file/);
   });
 });
 

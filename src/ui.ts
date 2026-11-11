@@ -799,7 +799,7 @@ ${section(
   "Who receives your data",
   `<ul><li><b>Google</b> supplies the sign-in, the Gmail API and the Google Calendar API. Your email stays in Gmail, and your events stay in Google Calendar.</li>
 <li><b>The provider of each agent that you connect</b> receives the email and calendar data that ${a} sends to that agent. For Claude and Claude Code, the provider is <b>Anthropic</b>, and the <a href="https://www.anthropic.com/legal/privacy" target="_blank" rel="noopener">Anthropic privacy policy</a> and your Claude settings apply to that data. For ChatGPT and Codex, the provider is <b>OpenAI</b>, and the <a href="https://openai.com/policies/privacy-policy/" target="_blank" rel="noopener">OpenAI privacy policy</a> and your ChatGPT settings apply to that data. For another app, the privacy policy of its provider applies.</li>
-<li><b>Cloudflare</b> runs ${a} and stores its data. Cloudflare can keep request logs.</li></ul>
+<li><b>Cloudflare</b> runs ${a} and stores its data. Cloudflare can keep request logs. When an agent reads a PDF or Office attachment, Cloudflare Workers AI converts it to text.</li></ul>
 <p>${a} does not send your data to other parties.</p>`,
 )}
 ${section(
@@ -859,13 +859,15 @@ export function costsPage(app: string) {
 <p class="lede">The Mailroom software is free of charge. ${a} runs on a Cloudflare account and uses a Google Cloud project, and these services can have costs. The person or organisation that deployed ${a} pays these costs. This page lists the services that ${a} uses, with links to their prices. Use these links to decide which plans you need.</p>
 ${section(
   "Cloudflare",
-  `<p>${a} uses Workers, Workers KV, D1, static assets and Workers Logs. The Workers Free plan includes a daily allowance for each service that has a charge. On the Free plan, Cloudflare does not charge for use above an allowance. Instead, requests can fail until the allowance resets.</p>
+  `<p>${a} uses Workers, Workers KV, D1, Workers AI, static assets and Workers Logs. The Workers Free plan includes a daily allowance for each service that has a charge. On the Free plan, Cloudflare does not charge for use above an allowance. Instead, requests can fail until the allowance resets.</p>
 <p>The Free plan also limits the CPU time of each request. A request that reads a large email can go over this limit and fail. The Workers Paid plan has a higher limit. It has a minimum monthly charge, and Cloudflare charges for use above the amounts that it includes.</p>
+<p>${a} uses the Markdown conversion of Workers AI to read PDF and Office attachments. Cloudflare states that this conversion is free for these documents. The conversion of images uses AI models that can have a charge, so ${a} does not convert images.</p>
 <ul class="refs">
 ${ref("https://developers.cloudflare.com/workers/platform/pricing/", "Workers pricing", "Plans, requests, CPU time, static assets")}
 ${ref("https://developers.cloudflare.com/workers/platform/limits/", "Workers limits", "CPU time for each request")}
 ${ref("https://developers.cloudflare.com/kv/platform/pricing/", "Workers KV pricing", "Reads, writes, storage")}
 ${ref("https://developers.cloudflare.com/d1/platform/pricing/", "D1 pricing", "Rows read, rows written, storage")}
+${ref("https://developers.cloudflare.com/workers-ai/features/markdown-conversion/", "Workers AI Markdown conversion", "Documents and images, and which conversions have a charge")}
 ${ref("https://developers.cloudflare.com/observability/pricing/", "Observability pricing", "Workers Logs")}
 </ul>`,
 )}

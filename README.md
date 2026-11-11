@@ -120,6 +120,7 @@ The agent then has these tools:
 | `search_all_accounts` | Searches every mailbox with the same Gmail search, and gives the newest threads of all the mailboxes in one list |
 | `summarise_all_accounts` | Gives the summary of `summarise_threads` for every mailbox, and the sum of the counts |
 | `get_thread` | Reads a whole thread, or one message of it, as plain text. It also gives the details of each calendar invitation in a message. |
+| `get_attachment` | Reads the text of one attachment: text and HTML files, calendar files, and PDF, Word, Excel and OpenDocument files, which Workers AI converts |
 | `list_labels` | Lists the labels of one mailbox |
 | `modify_thread_labels` | Adds labels to a thread or removes labels from it. When it adds a label that does not exist, it creates that label. Removing `INBOX` archives the thread. The tool rejects `TRASH` and `SPAM`. |
 | `modify_threads_labels` | Makes the same label change to up to 500 threads. You give a list of thread IDs. It previews first: see below. |
@@ -305,13 +306,14 @@ The Mailroom software is free of charge, under the [MIT License](LICENSE). Mailr
 
 ### Cloudflare
 
-Mailroom uses Workers, Workers KV, D1, static assets and Workers Logs. It does not use Durable Objects, Queues or Cron Triggers.
+Mailroom uses Workers, Workers KV, D1, Workers AI, static assets and Workers Logs. It does not use Durable Objects, Queues or Cron Triggers.
 
 - The Workers Free plan includes a daily allowance for each service that has a charge. On the Free plan, Cloudflare does not charge for use above an allowance. Instead, requests can fail until the allowance resets.
 - The Free plan also limits the CPU time of each request. A request that reads a large email can go over this limit and fail. The Workers Paid plan has a higher limit. It has a minimum monthly charge, and Cloudflare charges for use above the amounts that it includes.
+- Mailroom uses the Markdown conversion of Workers AI to read PDF and Office attachments. Cloudflare states that this conversion is free for these documents. The conversion of images uses AI models that can have a charge, so Mailroom does not convert images.
 - The `workers.dev` address has no charge. For a custom domain, you pay only for the domain.
 
-Pricing pages: [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [Workers limits](https://developers.cloudflare.com/workers/platform/limits/), [Workers KV](https://developers.cloudflare.com/kv/platform/pricing/), [D1](https://developers.cloudflare.com/d1/platform/pricing/), [Observability (Workers Logs)](https://developers.cloudflare.com/observability/pricing/).
+Pricing pages: [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [Workers limits](https://developers.cloudflare.com/workers/platform/limits/), [Workers KV](https://developers.cloudflare.com/kv/platform/pricing/), [D1](https://developers.cloudflare.com/d1/platform/pricing/), [Workers AI Markdown conversion](https://developers.cloudflare.com/workers-ai/features/markdown-conversion/), [Observability (Workers Logs)](https://developers.cloudflare.com/observability/pricing/).
 
 ### Google
 
