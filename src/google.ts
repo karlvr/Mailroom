@@ -167,6 +167,8 @@ export class GoogleApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    /** True when Google refused the request because of a rate limit. */
+    public rateLimited = false,
   ) {
     super(message);
   }
@@ -193,6 +195,16 @@ interface GoogleErrorBody {
   error?: { message?: string; errors?: { reason?: string }[]; details?: { reason?: string }[] };
 }
 
+// The reasons of the Google errors that are rate limits. Gmail gives some rate limits the status 403.
+const RATE_LIMIT_REASONS = new Set(["rateLimitExceeded", "userRateLimitExceeded", "RATE_LIMIT_EXCEEDED"]);
+
+/** Returns true when a Google error response is a rate limit: the status 429, or the reason of a rate limit. */
+function isRateLimit(status: number, body: unknown): boolean {
+  if (status === 429) return true;
+  const error = (body as GoogleErrorBody | undefined)?.error;
+  return [...(error?.errors ?? []), ...(error?.details ?? [])].some((e) => RATE_LIMIT_REASONS.has(e.reason ?? ""));
+}
+
 /** Returns true when Google refused a request because the API is not enabled in the Google Cloud project. */
 const isApiDisabled = (body: GoogleErrorBody) =>
   !!body.error?.details?.some((d) => d.reason === "SERVICE_DISABLED") ||
@@ -217,7 +229,7 @@ function apiError(env: Env, api: GoogleApi, status: number, data: GoogleErrorBod
       `The ${api.name} API is not enabled in the Google Cloud project of ${appName(env)}. The admin must enable it. See step 2 of the setup page.`,
     );
   }
-  return new GoogleApiError(status, data.error?.message ?? `${api.name} API error ${status}`);
+  return new GoogleApiError(status, data.error?.message ?? `${api.name} API error ${status}`, isRateLimit(status, data));
 }
 
 async function googleApi<T>(env: Env, account: Account, api: GoogleApi, path: string, init: ApiRequest | MediaRequest): Promise<T> {
@@ -255,6 +267,8 @@ export interface BatchResult {
   status: number;
   body: unknown;
   error?: string;
+  /** True when Google refused the call because of a rate limit. */
+  rateLimited?: boolean;
 }
 
 const GMAIL_BATCH_URL = "https://gmail.googleapis.com/batch/gmail/v1";
@@ -345,7 +359,7 @@ async function sendBatch(env: Env, account: Account, calls: BatchCall[]): Promis
     if (!p) return { status: 0, body: undefined, error: "Gmail gave no result for this call" };
     if (p.status >= 200 && p.status < 300) return p;
     const message = (p.body as GoogleErrorBody | undefined)?.error?.message;
-    return { ...p, error: message ?? `Gmail API error ${p.status}` };
+    return { ...p, error: message ?? `Gmail API error ${p.status}`, rateLimited: isRateLimit(p.status, p.body) };
   });
 }
 

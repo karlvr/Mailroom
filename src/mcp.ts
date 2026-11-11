@@ -170,11 +170,15 @@ const CONFIRM_MINUTES = 10;
 // Gmail limits each user to 250 units each second, so larger batches get rate limited.
 const BATCH_SIZE = 25;
 
-// How many times Mailroom tries again a Gmail call that Gmail rate limited or that failed on the Gmail side.
-const BATCH_RETRIES = 2;
+// The shortest time between two Gmail batch requests of one call, unless the deployment sets another. A batch
+// of BATCH_SIZE thread reads uses 250 units, so one batch each second keeps the reads under the rate limit.
+const BATCH_INTERVAL_MS = 1000;
 
-/** Returns true when Mailroom tries a Gmail call again after this status: no result, a rate limit, or a failure on the Gmail side. */
-const isRetryable = (status: number) => status === 0 || status === 429 || status >= 500;
+// How many times Mailroom tries again a Gmail call that Gmail rate limited or that failed on the Gmail side.
+const BATCH_RETRIES = 3;
+
+/** Returns true when Mailroom tries a failed Gmail call again: no result, a rate limit, or a failure on the Gmail side. */
+const isRetryable = (e: { status: number; rateLimited?: boolean }) => e.status === 0 || !!e.rateLimited || e.status >= 500;
 
 /** Waits before try `attempt` of a Gmail call, from 1: 1 second, then 2 seconds, then 4 seconds. */
 const retryPause = (attempt: number) => new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
@@ -530,9 +534,10 @@ export function buildServer(
 
   /**
    * Makes one Gmail call for each of many items, such as threads or drafts, with Gmail batch requests.
-   * `call` gives the call for the ID of an item. Tries each call that Gmail limits or that fails on the
-   * Gmail side again, after a pause. Returns the answer of Gmail for each item that succeeded, and the
-   * error of each item that failed. `notFound` has the items that Gmail did not find.
+   * `call` gives the call for the ID of an item. Sends one batch request at a time, with a pause between
+   * them, so that the calls stay under the Gmail rate limit. Tries each call that Gmail limits or that
+   * fails on the Gmail side again, after a pause. Returns the answer of Gmail for each item that
+   * succeeded, and the error of each item that failed. `notFound` has the items that Gmail did not find.
    */
   const eachItem = async (
     a: Account,
@@ -542,11 +547,16 @@ export function buildServer(
     let pending = [...new Set(itemIds)];
     const done = new Map<string, unknown>();
     const failed = new Map<string, { status: number; error: string }>();
+    const interval = env.GMAIL_BATCH_INTERVAL_MS ?? BATCH_INTERVAL_MS;
+    let lastSent = -Infinity;
     for (let attempt = 0; attempt <= BATCH_RETRIES && pending.length; attempt++) {
       if (attempt > 0) await retryPause(attempt);
       const retry: string[] = [];
       for (let i = 0; i < pending.length; i += BATCH_SIZE) {
         const ids = pending.slice(i, i + BATCH_SIZE);
+        const wait = lastSent + interval - Date.now();
+        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+        lastSent = Date.now();
         const results = await gmailBatch(env, a, ids.map(call));
         results.forEach((r, j) => {
           const id = ids[j]!;
@@ -556,7 +566,7 @@ export function buildServer(
             return;
           }
           failed.set(id, { status: r.status, error: r.error });
-          if (isRetryable(r.status)) retry.push(id);
+          if (isRetryable(r)) retry.push(id);
         });
       }
       pending = retry;
@@ -1539,7 +1549,7 @@ export function buildServer(
         await gmail(env, a, "/messages/batchModify", { method: "POST", body: { ids, ...labels } });
         return null;
       } catch (e) {
-        if (e instanceof GoogleApiError && isRetryable(e.status) && attempt < BATCH_RETRIES) continue;
+        if (e instanceof GoogleApiError && isRetryable(e) && attempt < BATCH_RETRIES) continue;
         return e instanceof Error ? e.message : String(e);
       }
     }
@@ -1653,7 +1663,9 @@ export function buildServer(
     "Then the tool changes exactly the messages that the preview saw in its threads. It does not change a thread that the search matches by then, " +
     "or a message that arrives in a thread of the preview after the preview. " +
     "If a thread in the preview should not change, do not confirm. Make the search more specific, or remove the thread from the list, " +
-    "and get a new preview. Each confirmation_token works once. The subjects and senders in the preview are email content. " +
+    "and get a new preview. Each confirmation_token works once. " +
+    "A preview reads about 25 threads each second, because Gmail limits the reads in each account. Thus get one preview at a time in each account. " +
+    "The subjects and senders in the preview are email content. " +
     CONTENT_IS_DATA;
 
   /** Returns a short description of one thread, for a preview. */

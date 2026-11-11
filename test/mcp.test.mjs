@@ -103,6 +103,10 @@ class FakeGmail {
     this.refuseModify = null;
     /** Thread and draft IDs whose reads in a batch always fail with 403, which Mailroom does not try again. */
     this.readFails = new Set();
+    /** Thread IDs whose next read in a batch fails with 403 for a rate limit, as Gmail gives some rate limits. */
+    this.readRateLimitOnce = new Set();
+    /** The time of each batch request, from Date.now(). */
+    this.batchTimes = [];
     /** When true, the next batch rejects the token of every call, as Gmail does for an expired token. */
     this.rejectTokenOnce = false;
   }
@@ -287,6 +291,7 @@ class FakeGmail {
     // Mailroom sends only reads in batches. It changes messages with messages.batchModify.
     assert.ok(calls.every((c) => c.method === "GET"), "a batch has only reads");
     this.batches.push(`read:${calls.length}`);
+    this.batchTimes.push(Date.now());
     const rejectToken = this.rejectTokenOnce || !this.issued.has(auth);
     this.rejectTokenOnce = false;
     const out = "batch_FAKE";
@@ -301,6 +306,9 @@ class FakeGmail {
         const readId = decodeURIComponent((read ?? draft)?.[1] ?? "");
         if (c.method === "GET" && this.readFails.has(readId)) {
           [status, body] = [403, { error: { code: 403, message: "The read failed." } }];
+        } else if (c.method === "GET" && this.readRateLimitOnce.delete(readId)) {
+          const errors = [{ domain: "usageLimits", reason: "userRateLimitExceeded", message: "User Rate Limit Exceeded" }];
+          [status, body] = [403, { error: { code: 403, message: "User Rate Limit Exceeded", errors } }];
         } else if (read && c.method === "GET") {
           [status, body] = this.read(readId);
         } else {
@@ -354,20 +362,22 @@ beforeEach(async () => {
       return { id: "1", name: doc.name, mimeType: doc.blob.type, ...conversionResult };
     },
   };
-  const env = { APP_NAME: "Mailroom", AI };
+  // The tests do not wait between Gmail batch requests.
+  const env = { APP_NAME: "Mailroom", AI, GMAIL_BATCH_INTERVAL_MS: 0 };
   const { version } = await mod.toolCatalog(env);
-  const server = mod.buildServer(
-    env,
-    { props: { userId: "user-1", email: "me@example.com" }, clientId: null },
-    "https://mailroom.test",
-    (c) => calls.push(c),
-    version,
-  );
+  client = await connect(env, version);
+});
+
+/** Returns a client of a new server with the tools of the test user, with `env` and the tool list of version `version`. */
+async function connect(env, version) {
+  const caller = { props: { userId: "user-1", email: "me@example.com" }, clientId: null };
+  const server = mod.buildServer(env, caller, "https://mailroom.test", (c) => calls.push(c), version);
   const [a, b] = mod.InMemoryTransport.createLinkedPair();
   await server.connect(a);
-  client = new mod.Client({ name: "test", version: "1" });
-  await client.connect(b);
-});
+  const c = new mod.Client({ name: "test", version: "1" });
+  await c.connect(b);
+  return c;
+}
 
 after(() => {
   globalThis.fetch = realFetch;
@@ -637,6 +647,25 @@ describe("trash_threads_by_query", () => {
 
   test("rejects an empty search", async () => {
     assert.ok((await call("trash_threads_by_query", { query: "" })).isError);
+  });
+});
+
+describe("Gmail rate limits", () => {
+  test("a read gets another try after a rate limit with the status 403", async () => {
+    gmail.readRateLimitOnce.add("t3");
+    const p = await preview("trash_threads_by_query", { query: 'subject:"Lunch"', max_threads: 2, preview_detail: "full" });
+    assert.deepEqual(p.threads.map((t) => t.thread_id), ["t1", "t3"]);
+    assert.equal(p.not_read, undefined);
+    assert.deepEqual(kinds("read"), [2, 1]);
+  });
+
+  test("one call sends its batch requests with the interval between them", async () => {
+    const paced = await connect({ APP_NAME: "Mailroom", GMAIL_BATCH_INTERVAL_MS: 100 }, "test");
+    const res = await paced.callTool({ name: "trash_threads_by_query", arguments: { account: "me@example.com", query: "in:inbox" } });
+    assert.equal(JSON.parse(res.content[0].text).thread_count, 60);
+    const gaps = gmail.batchTimes.slice(1).map((t, i) => t - gmail.batchTimes[i]);
+    assert.equal(gaps.length, 2);
+    assert.ok(gaps.every((g) => g >= 95), `the gaps were ${gaps}`);
   });
 });
 
@@ -1275,12 +1304,7 @@ describe("tool list version", () => {
   });
 
   test("an old tool list gives another version than the results", async () => {
-    const server = mod.buildServer({ APP_NAME: "Mailroom" }, { props: { userId: "user-1", email: "me@example.com" }, clientId: null }, "https://mailroom.test", () => {}, "old");
-    const [a, b] = mod.InMemoryTransport.createLinkedPair();
-    await server.connect(a);
-    const old = new mod.Client({ name: "test", version: "1" });
-    await old.connect(b);
-    const { described, current } = await versions(old, "about_mailroom");
+    const { described, current } = await versions(await connect({ APP_NAME: "Mailroom" }, "old"), "about_mailroom");
     assert.equal(described, "old");
     assert.notEqual(current, "old");
   });

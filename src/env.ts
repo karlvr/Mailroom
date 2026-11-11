@@ -9,6 +9,11 @@ export interface Env {
   ADMIN_PASSWORD: string;
   /** Optional display name shown in the UI and to agents. */
   APP_NAME?: string;
+  /**
+   * Optional. The shortest time in milliseconds between two Gmail batch requests of one tool call. The
+   * default is 1000, which keeps the reads of one call under the Gmail rate limit of each user.
+   */
+  GMAIL_BATCH_INTERVAL_MS?: number;
   OAUTH_PROVIDER: OAuthHelpers;
 }
 
