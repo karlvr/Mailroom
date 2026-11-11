@@ -17,6 +17,7 @@ export const RELEASE_NOTES: ReleaseDay[] = [
   {
     date: "2026-11-12",
     changes: [
+      "A bulk clean-up changes only the messages that the agent saw in its preview. A reply that arrives after the preview stays in your inbox, and drafts never change.",
       "Agents can keep notes between runs, such as when the last briefing ran or which threads already got an update. You can read and delete these notes on the Mailboxes page.",
       "An agent can read attachments: text and log files, calendar files, and PDF, Word and Excel documents, for example to find the amount and due date of an invoice.",
       "An agent can read the details of an invitation in an email, from Google, Outlook or iCloud: the time, the organizer and who accepted.",

@@ -90,8 +90,12 @@ class FakeGmail {
     this.tokens = 0;
     /** The access tokens that this fake issued. Like Google, it accepts each of them. */
     this.issued = new Set();
-    /** Thread IDs whose next modify gets 429 once. */
+    /** Thread IDs whose next change gets 429 once. A messages.batchModify request with a message of such a thread gets 429 for all its messages. */
     this.rateLimitOnce = new Set();
+    /** The messages.batchModify requests that the fake got: the message IDs, and the labels to add and to remove. */
+    this.modifyRequests = [];
+    /** When set, each messages.batchModify request fails with this error, for example { code: 400, message: "..." }. */
+    this.refuseModify = null;
     /** Thread and draft IDs whose reads in a batch always fail with 403, which Mailroom does not try again. */
     this.readFails = new Set();
     /** When true, the next batch rejects the token of every call, as Gmail does for an expired token. */
@@ -115,6 +119,15 @@ class FakeGmail {
     return [200, { id, messages: [] }];
   }
 
+  /**
+   * Returns the messages of a thread. The first message has the ID `${threadId}-m1`, the labels of the thread and its
+   * `trashed` flag. Each item of `replies` is one more message, with its own ID, labels and `trashed` flag.
+   */
+  messagesOf(id) {
+    const t = this.threads.get(id);
+    return [{ id: `${id}-m1`, item: t }, ...(t.replies ?? []).map((r) => ({ id: r.id, item: r }))];
+  }
+
   read(id) {
     const t = this.threads.get(id);
     if (!t) return [404, { error: { code: 404, message: "Requested entity was not found." } }];
@@ -124,15 +137,29 @@ class FakeGmail {
       { name: "Date", value: t.date ?? "Tue, 10 Nov 2026 09:00:00 +1300" },
       ...(t.list ? [{ name: "List-Id", value: t.list }] : []),
     ];
-    return [200, { id, messages: [{ id: `${id}-m1`, threadId: id, labelIds: [...t.labels], payload: { headers } }] }];
+    const messages = this.messagesOf(id).map((m) => ({
+      id: m.id,
+      threadId: id,
+      labelIds: [...m.item.labels, ...(m.item.trashed ? ["TRASH"] : [])],
+      payload: { headers },
+    }));
+    return [200, { id, messages }];
   }
 
-  trash(id) {
-    const t = this.threads.get(id);
-    if (!t) return [404, { error: { code: 404, message: "Requested entity was not found." } }];
-    if (this.rateLimitOnce.delete(id)) return [429, { error: { code: 429, message: "User-rate limit exceeded." } }];
-    t.trashed = true;
-    return [200, { id }];
+  /** Changes the labels of messages, as messages.batchModify does. The TRASH label sets the `trashed` flag of a message. */
+  batchModify(body) {
+    this.modifyRequests.push(body);
+    if (this.refuseModify) return [this.refuseModify.code, { error: this.refuseModify }];
+    const byId = new Map([...this.threads.keys()].flatMap((tid) => this.messagesOf(tid).map((m) => [m.id, { ...m, threadId: tid }])));
+    if (body.ids.some((id) => !byId.has(id))) return [400, { error: { code: 400, message: "Invalid id value" } }];
+    const limited = body.ids.filter((id) => this.rateLimitOnce.delete(byId.get(id).threadId));
+    if (limited.length) return [429, { error: { code: 429, message: "User-rate limit exceeded." } }];
+    for (const id of body.ids) {
+      const { item } = byId.get(id);
+      for (const l of body.addLabelIds ?? []) l === "TRASH" ? (item.trashed = true) : item.labels.add(l);
+      for (const l of body.removeLabelIds ?? []) l === "TRASH" ? (item.trashed = false) : item.labels.delete(l);
+    }
+    return [204, null];
   }
 
   async fetch(input, init = {}) {
@@ -207,6 +234,10 @@ class FakeGmail {
       }
       return Response.json(this.mailMessage(id, Number(message[2])));
     }
+    if (path === "/messages/batchModify" && method === "POST") {
+      const [status, body] = this.batchModify(JSON.parse(init.body));
+      return status === 204 ? new Response(null, { status }) : Response.json(body, { status });
+    }
     const m = /^\/threads\/([^/]+)\/modify$/.exec(path);
     if (m && method === "POST") {
       const [status, body] = this.modify(decodeURIComponent(m[1]), JSON.parse(init.body));
@@ -242,8 +273,9 @@ class FakeGmail {
         const bodyAt = p.indexOf("{");
         return { id, method, path, body: bodyAt >= 0 ? JSON.parse(p.slice(bodyAt).trim()) : undefined };
       });
-    const kind = calls[0].method === "GET" ? "read" : calls[0].path.endsWith("/trash") ? "trash" : "modify";
-    this.batches.push(`${kind}:${calls.length}`);
+    // Mailroom sends only reads in batches. It changes messages with messages.batchModify.
+    assert.ok(calls.every((c) => c.method === "GET"), "a batch has only reads");
+    this.batches.push(`read:${calls.length}`);
     const rejectToken = this.rejectTokenOnce || !this.issued.has(auth);
     this.rejectTokenOnce = false;
     const out = "batch_FAKE";
@@ -255,18 +287,14 @@ class FakeGmail {
       } else {
         const read = /^\/gmail\/v1\/users\/me\/threads\/([^/?]+)\?format=metadata&/.exec(c.path);
         const draft = /^\/gmail\/v1\/users\/me\/drafts\/([^/?]+)\?format=metadata$/.exec(c.path);
-        const m = /^\/gmail\/v1\/users\/me\/threads\/([^/]+)\/(modify|trash)$/.exec(c.path);
         const readId = decodeURIComponent((read ?? draft)?.[1] ?? "");
         if (c.method === "GET" && this.readFails.has(readId)) {
           [status, body] = [403, { error: { code: 403, message: "The read failed." } }];
         } else if (read && c.method === "GET") {
           [status, body] = this.read(readId);
-        } else if (draft && c.method === "GET") {
-          [status, body] = this.draft(readId);
         } else {
-          assert.ok(m && c.method === "POST", `unexpected batch call ${c.method} ${c.path}`);
-          const id = decodeURIComponent(m[1]);
-          [status, body] = m[2] === "trash" ? this.trash(id) : this.modify(id, c.body);
+          assert.ok(draft, `unexpected batch call ${c.method} ${c.path}`);
+          [status, body] = this.draft(readId);
         }
       }
       return [
@@ -430,7 +458,7 @@ describe("preview", () => {
       assert.match(r.text, /does not work for this call/, `${name} ${JSON.stringify(args)}`);
     }
     assert.ok([...gmail.threads.values()].every((x) => !x.trashed && x.labels.size === 1));
-    assert.deepEqual(kinds("modify"), []);
+    assert.deepEqual(gmail.modifyRequests, []);
   });
 
   test("an invented token changes nothing", async () => {
@@ -456,7 +484,7 @@ describe("preview", () => {
 });
 
 describe("modify_labels_by_query", () => {
-  test("changes every matching thread, in batches of at most 25, and creates a missing label", async () => {
+  test("changes every matching thread in one request, and creates a missing label", async () => {
     const r = await previewAndConfirm("modify_labels_by_query", { query: failures, add: ["Ops/PopularityService"], remove: ["INBOX"] });
     assert.equal(r.threads, 30);
     assert.equal(r.changed, 30);
@@ -468,7 +496,7 @@ describe("modify_labels_by_query", () => {
       assert.equal(t.labels.has(id), failure, `${tid} label`);
       assert.equal(t.labels.has("INBOX"), !failure, `${tid} inbox`);
     }
-    assert.deepEqual(kinds("modify"), [25, 5]);
+    assert.deepEqual(gmail.modifyRequests.map((r) => r.ids.length), [30]);
     assert.deepEqual(calls, [
       { accountId: "acct-1", change: false },
       { accountId: "acct-1", change: true },
@@ -484,7 +512,7 @@ describe("modify_labels_by_query", () => {
     assert.equal(big.thread_count, 500);
     const r = await call("modify_labels_by_query", { query: "in:inbox", add: ["Existing"], confirmation_token: big.confirmation_token });
     assert.equal(r.changed, 500);
-    assert.equal(kinds("modify").length, 20);
+    assert.deepEqual(gmail.modifyRequests.map((r) => r.ids.length), [500]);
   });
 
   test("rejects an empty search, forbidden labels and an empty change, before it reads mail", async () => {
@@ -496,7 +524,7 @@ describe("modify_labels_by_query", () => {
 });
 
 describe("modify_threads_labels", () => {
-  test("changes each thread, and tries rate-limited threads again", async () => {
+  test("changes each thread, and tries a rate-limited request again", async () => {
     const p = await preview("modify_threads_labels", { thread_ids: ["t1", "t3", "t7"], add: ["STARRED"], remove: ["INBOX"] });
     gmail.rateLimitOnce = new Set(["t3", "t7"]);
     const r = await call("modify_threads_labels", {
@@ -511,7 +539,7 @@ describe("modify_threads_labels", () => {
       assert.ok(gmail.threads.get(id).labels.has("STARRED"));
       assert.ok(!gmail.threads.get(id).labels.has("INBOX"));
     }
-    assert.deepEqual(kinds("modify"), [3, 2]);
+    assert.deepEqual(gmail.modifyRequests.map((r) => r.ids.length), [3, 3]);
   });
 
   test("a token does not work for another list of threads", async () => {
@@ -521,12 +549,12 @@ describe("modify_threads_labels", () => {
   });
 
   test("gets a new token when Gmail rejects the token inside a batch", async () => {
-    const p = await preview("modify_threads_labels", { thread_ids: ["t2", "t4"], add: ["Existing"] });
+    await preview("modify_threads_labels", { thread_ids: ["t2", "t4"], add: ["Existing"] });
     const before = gmail.tokenRequests;
     gmail.rejectTokenOnce = true;
-    const r = await call("modify_threads_labels", { thread_ids: ["t2", "t4"], add: ["Existing"], confirmation_token: p.confirmation_token });
-    assert.equal(r.changed, 2);
-    assert.deepEqual(r.failed, []);
+    const p = await preview("modify_threads_labels", { thread_ids: ["t2", "t4"], add: ["Existing"], preview_detail: "full" });
+    assert.deepEqual(p.threads.map((t) => t.thread_id), ["t2", "t4"]);
+    assert.equal(p.not_read, undefined);
     assert.equal(gmail.tokenRequests, before + 1);
   });
 
@@ -542,7 +570,7 @@ describe("trash_threads_by_query", () => {
     assert.equal(r.trashed, 30);
     assert.deepEqual(r.failed, []);
     for (const t of gmail.threads.values()) assert.equal(!!t.trashed, t.subject === "PopularityService failure");
-    assert.deepEqual(kinds("trash"), [25, 5]);
+    assert.deepEqual(gmail.modifyRequests.map((r) => [r.ids.length, r.addLabelIds]), [[30, ["TRASH"]]]);
     const again = await preview("trash_threads_by_query", { query: failures });
     assert.equal(again.thread_count, 0);
   });
@@ -629,13 +657,61 @@ describe("safeguards", () => {
 });
 
 describe("trash_threads", () => {
-  test("trashes each thread and tries rate-limited threads again", async () => {
+  test("trashes each thread and tries a rate-limited request again", async () => {
     const p = await preview("trash_threads", { thread_ids: ["t1", "t2"] });
     gmail.rateLimitOnce = new Set(["t2"]);
     const r = await call("trash_threads", { thread_ids: ["t1", "t2"], confirmation_token: p.confirmation_token });
     assert.equal(r.trashed, 2);
     assert.ok(gmail.threads.get("t1").trashed && gmail.threads.get("t2").trashed);
     assert.ok(!gmail.threads.get("t3").trashed);
+  });
+});
+
+describe("the messages of a preview", () => {
+  test("a reply that arrives after the preview stays in the inbox, after a trash and after an archive", async () => {
+    const trash = await preview("trash_threads", { thread_ids: ["t0"] });
+    const archive = await preview("modify_threads_labels", { thread_ids: ["t1"], remove: ["INBOX"] });
+    for (const id of ["t0", "t1"]) gmail.threads.get(id).replies = [{ id: `${id}-r1`, labels: new Set(["INBOX", "UNREAD"]) }];
+    assert.equal((await call("trash_threads", { thread_ids: ["t0"], confirmation_token: trash.confirmation_token })).trashed, 1);
+    const archived = await call("modify_threads_labels", { thread_ids: ["t1"], remove: ["INBOX"], confirmation_token: archive.confirmation_token });
+    assert.equal(archived.changed, 1);
+    const [t0, t1] = [gmail.threads.get("t0"), gmail.threads.get("t1")];
+    assert.ok(t0.trashed && !t0.replies[0].trashed);
+    assert.ok(!t1.labels.has("INBOX") && t1.replies[0].labels.has("INBOX"));
+    assert.deepEqual(gmail.modifyRequests.map((r) => r.ids), [["t0-m1"], ["t1-m1"]]);
+  });
+
+  test("never changes drafts, and leaves out a thread with only drafts", async () => {
+    gmail.threads.get("t0").replies = [{ id: "t0-d1", labels: new Set(["DRAFT"]) }];
+    gmail.threads.get("t2").labels = new Set(["DRAFT"]);
+    const p = await preview("trash_threads", { thread_ids: ["t0", "t2"], preview_detail: "full" });
+    assert.deepEqual(p.threads.map((t) => t.thread_id), ["t0"]);
+    assert.deepEqual(p.left_out, { drafts: 1 });
+    assert.equal((await call("trash_threads", { thread_ids: ["t0", "t2"], confirmation_token: p.confirmation_token })).trashed, 1);
+    assert.deepEqual(gmail.modifyRequests.map((r) => r.ids), [["t0-m1"]]);
+    assert.ok(!gmail.threads.get("t0").replies[0].trashed);
+  });
+
+  test("sends at most 1000 messages in each request, and counts a thread in two requests once", async () => {
+    gmail = new FakeGmail(500);
+    for (const [id, t] of gmail.threads) t.replies = [1, 2].map((n) => ({ id: `${id}-r${n}`, labels: new Set(["INBOX"]) }));
+    const r = await previewAndConfirm("modify_labels_by_query", { query: "in:inbox", remove: ["INBOX"], max_threads: 500 });
+    assert.equal(r.changed, 500);
+    assert.deepEqual(r.failed, []);
+    assert.deepEqual(gmail.modifyRequests.map((x) => x.ids.length), [1000, 500]);
+    assert.ok([...gmail.threads.values()].every((t) => !t.labels.has("INBOX") && t.replies.every((m) => !m.labels.has("INBOX"))));
+  });
+
+  test("when Gmail refuses a request, each thread in it fails with the error", async () => {
+    const p = await preview("trash_threads", { thread_ids: ["t1", "t2"] });
+    gmail.refuseModify = { code: 400, message: "Invalid id value" };
+    const r = await call("trash_threads", { thread_ids: ["t1", "t2"], confirmation_token: p.confirmation_token });
+    assert.equal(r.trashed, 0);
+    assert.deepEqual(r.failed, [
+      { thread_id: "t1", error: "Invalid id value" },
+      { thread_id: "t2", error: "Invalid id value" },
+    ]);
+    assert.equal(gmail.modifyRequests.length, 1);
   });
 });
 

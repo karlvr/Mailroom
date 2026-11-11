@@ -38,20 +38,22 @@ export const getRefreshToken = async (_env: unknown, a: Account): Promise<string
 export const setAccountStatus = async (): Promise<void> => {};
 
 // The previews of the bulk tools, in memory, by token hash.
-export const confirmations = new Map<string, { accountId: string; action: string; threadIds: string[]; expiresAt: number }>();
+export const confirmations = new Map<string, real.BulkConfirmation>();
 
-export const saveBulkConfirmation = async (
-  _env: unknown,
-  c: { tokenHash: string; accountId: string; action: string; threadIds: string[]; expiresAt: number },
-): Promise<void> => {
-  confirmations.set(c.tokenHash, { accountId: c.accountId, action: c.action, threadIds: c.threadIds, expiresAt: c.expiresAt });
+export const saveBulkConfirmation = async (_env: unknown, c: real.BulkConfirmation): Promise<void> => {
+  confirmations.set(c.tokenHash, c);
 };
 
-export const takeBulkConfirmation = async (_env: unknown, tokenHash: string, accountId: string, action: string): Promise<string[] | null> => {
+export const takeBulkConfirmation = async (
+  _env: unknown,
+  tokenHash: string,
+  accountId: string,
+  action: string,
+): Promise<real.PreviewThread[] | null> => {
   const c = confirmations.get(tokenHash);
   if (!c || c.accountId !== accountId || c.action !== action || c.expiresAt <= Date.now()) return null;
   confirmations.delete(tokenHash);
-  return c.threadIds;
+  return c.threads;
 };
 
 export const contextSummaries = async () => ({ global: { context: "", summary: null }, accounts: new Map() });

@@ -352,6 +352,13 @@ export async function accountUsage(env: Env, userId: string): Promise<Map<string
 
 // ---------- bulk confirmations ----------
 
+/** A thread that a preview showed, with the messages that the preview saw in it. */
+export interface PreviewThread {
+  threadId: string;
+  /** The messages that a confirmation changes. A message that arrives in the thread after the preview is not in the list. */
+  messageIds: string[];
+}
+
 /** A preview of a bulk thread tool that waits for the agent to confirm it. */
 export interface BulkConfirmation {
   /** The SHA-256 of the confirmation token, in base64url. */
@@ -360,7 +367,7 @@ export interface BulkConfirmation {
   /** The tool and its arguments, as JSON. */
   action: string;
   /** The threads that the preview showed. */
-  threadIds: string[];
+  threads: PreviewThread[];
   /** The time when the preview expires, in milliseconds since the epoch. */
   expiresAt: number;
 }
@@ -370,8 +377,8 @@ export async function saveBulkConfirmation(env: Env, c: BulkConfirmation): Promi
   await env.DB.batch([
     env.DB.prepare("DELETE FROM bulk_confirmations WHERE expires_at <= ?").bind(Date.now()),
     env.DB.prepare(
-      "INSERT INTO bulk_confirmations (token_hash, account_id, action, thread_ids, expires_at) VALUES (?, ?, ?, ?, ?)",
-    ).bind(c.tokenHash, c.accountId, c.action, JSON.stringify(c.threadIds), c.expiresAt),
+      "INSERT INTO bulk_confirmations (token_hash, account_id, action, threads, expires_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind(c.tokenHash, c.accountId, c.action, JSON.stringify(c.threads), c.expiresAt),
   ]);
 }
 
@@ -385,14 +392,14 @@ export async function takeBulkConfirmation(
   tokenHash: string,
   accountId: string,
   action: string,
-): Promise<string[] | null> {
+): Promise<PreviewThread[] | null> {
   const row = await env.DB.prepare(
     `DELETE FROM bulk_confirmations WHERE token_hash = ? AND account_id = ? AND action = ? AND expires_at > ?
-     RETURNING thread_ids`,
+     RETURNING threads`,
   )
     .bind(tokenHash, accountId, action, Date.now())
-    .first<{ thread_ids: string }>();
-  return row ? (JSON.parse(row.thread_ids) as string[]) : null;
+    .first<{ threads: string }>();
+  return row ? (JSON.parse(row.threads) as PreviewThread[]) : null;
 }
 
 // ---------- context history ----------

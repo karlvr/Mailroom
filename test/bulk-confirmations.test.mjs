@@ -28,15 +28,18 @@ const preview = (over = {}) => ({
   tokenHash: "hash-1",
   accountId: "acct-1",
   action: '{"tool":"trash_threads_by_query","query":"x"}',
-  threadIds: ["t1", "t2"],
+  threads: [
+    { threadId: "t1", messageIds: ["m1", "m2"] },
+    { threadId: "t2", messageIds: ["m3"] },
+  ],
   expiresAt: Date.now() + 600_000,
   ...over,
 });
 
-test("a preview gives its threads once", async () => {
+test("a preview gives its threads and their messages once", async () => {
   const { env } = await freshEnv();
   await db.saveBulkConfirmation(env, preview());
-  assert.deepEqual(await db.takeBulkConfirmation(env, "hash-1", "acct-1", preview().action), ["t1", "t2"]);
+  assert.deepEqual(await db.takeBulkConfirmation(env, "hash-1", "acct-1", preview().action), preview().threads);
   assert.equal(await db.takeBulkConfirmation(env, "hash-1", "acct-1", preview().action), null);
 });
 
@@ -45,7 +48,7 @@ test("a preview does not work for another account or action, and stays for the r
   await db.saveBulkConfirmation(env, preview());
   assert.equal(await db.takeBulkConfirmation(env, "hash-1", "acct-2", preview().action), null);
   assert.equal(await db.takeBulkConfirmation(env, "hash-1", "acct-1", '{"tool":"trash_threads_by_query","query":"y"}'), null);
-  assert.deepEqual(await db.takeBulkConfirmation(env, "hash-1", "acct-1", preview().action), ["t1", "t2"]);
+  assert.deepEqual(await db.takeBulkConfirmation(env, "hash-1", "acct-1", preview().action), preview().threads);
 });
 
 test("an expired preview does not work, and a new preview deletes it", async () => {

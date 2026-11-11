@@ -23,6 +23,7 @@ import {
   MAX_STATE_NOTES,
   MAX_STATE_VALUE_CHARS,
   PERMISSION_LABELS,
+  type PreviewThread,
   type StateNote,
   type StateScope,
   accountPermissions,
@@ -157,12 +158,21 @@ const PREVIEW_SUBJECTS = 3;
 // How long the preview of a bulk tool waits for the agent to confirm it.
 const CONFIRM_MINUTES = 10;
 
-// The number of thread changes in one Gmail batch request. Each change, a label change or a trash, uses 10 units of the Gmail
-// quota, and Gmail limits each user to 250 units each second, so larger batches get rate limited.
+// The number of calls in one Gmail batch request. Each thread read uses 10 units of the Gmail quota, and
+// Gmail limits each user to 250 units each second, so larger batches get rate limited.
 const BATCH_SIZE = 25;
 
-// How many times a bulk tool tries again the changes that Gmail rate limited or that failed on the Gmail side.
+// How many times Mailroom tries again a Gmail call that Gmail rate limited or that failed on the Gmail side.
 const BATCH_RETRIES = 2;
+
+/** Returns true when Mailroom tries a Gmail call again after this status: no result, a rate limit, or a failure on the Gmail side. */
+const isRetryable = (status: number) => status === 0 || status === 429 || status >= 500;
+
+/** Waits before try `attempt` of a Gmail call, from 1: 1 second, then 2 seconds, then 4 seconds. */
+const retryPause = (attempt: number) => new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
+
+// The largest number of messages in one messages.batchModify request, which Gmail allows.
+const MAX_MODIFY_MESSAGES = 1000;
 
 interface GmailMessage {
   id: string;
@@ -226,13 +236,17 @@ interface Safeguards {
   protect: boolean;
 }
 
-/** Why the safeguards leave a thread out of a bulk change. */
-type LeftOut = "starred" | "sent" | "newer" | "unread";
+/** Why a bulk change leaves a thread out: a thread with only drafts, or a safeguard. */
+type LeftOut = "drafts" | "starred" | "sent" | "newer" | "unread";
 
-/** Returns why the safeguards leave a thread out, or null when they keep it. A message without a valid time counts as new. */
+/** Returns the messages of a thread that a bulk change changes. A bulk change never changes a draft. */
+const messagesToChange = (t: GmailThread) => (t.messages ?? []).filter((m) => !m.labelIds?.includes("DRAFT"));
+
+/** Returns why a bulk change leaves a thread out, or null when it keeps it. A message without a valid time counts as new. */
 function leftOutBy(t: GmailThread, rules: Safeguards, now: number): LeftOut | null {
   const msgs = t.messages ?? [];
   const has = (label: string) => msgs.some((m) => m.labelIds?.includes(label));
+  if (!messagesToChange(t).length) return "drafts";
   if (rules.protect && has("STARRED")) return "starred";
   if (rules.protect && has("SENT")) return "sent";
   if (rules.olderThanDays !== undefined) {
@@ -507,7 +521,7 @@ export function buildServer(
     const done = new Map<string, unknown>();
     const failed = new Map<string, { status: number; error: string }>();
     for (let attempt = 0; attempt <= BATCH_RETRIES && pending.length; attempt++) {
-      if (attempt > 0) await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
+      if (attempt > 0) await retryPause(attempt);
       const retry: string[] = [];
       for (let i = 0; i < pending.length; i += BATCH_SIZE) {
         const ids = pending.slice(i, i + BATCH_SIZE);
@@ -520,7 +534,7 @@ export function buildServer(
             return;
           }
           failed.set(id, { status: r.status, error: r.error });
-          if (r.status === 0 || r.status === 429 || r.status >= 500) retry.push(id);
+          if (isRetryable(r.status)) retry.push(id);
         });
       }
       pending = retry;
@@ -532,12 +546,6 @@ export function buildServer(
       notFound: all.filter(([, f]) => f.status === 404).map(([id]) => id),
     };
   };
-
-  /** Returns the threads that failed in eachItem, and the threads that Gmail did not find, as a bulk result gives them. */
-  const threadFailures = (failed: { id: string; error: string }[], notFound: string[]) => [
-    ...failed.map(({ id, error }) => ({ thread_id: id, error })),
-    ...notFound.map((thread_id) => ({ thread_id, error: "Gmail did not find the thread." })),
-  ];
 
   /**
    * Reads the threads with the IDs in Gmail batch requests, with the labels of each message and the
@@ -556,7 +564,7 @@ export function buildServer(
     }));
     return {
       threads: [...new Set(ids)].flatMap((id) => (done.has(id) ? [done.get(id) as GmailThread] : [])),
-      failed: threadFailures(failed, []),
+      failed: failed.map(({ id, error }) => ({ thread_id: id, error })),
       notFound,
     };
   };
@@ -1480,13 +1488,52 @@ export function buildServer(
     return { body: { addLabelIds, removeLabelIds }, notFound };
   };
 
-  /** Returns the call that changes the labels of one thread, for eachItem. */
-  const modifyCall =
-    (body: { addLabelIds: string[]; removeLabelIds: string[] }) =>
-    (id: string): BatchCall => ({ method: "POST", path: `/threads/${encodeURIComponent(id)}/modify`, body });
+  /** The IDs of the labels to add to messages, and to remove from them. */
+  type LabelIds = { addLabelIds: string[]; removeLabelIds: string[] };
 
-  /** Returns the call that moves one thread to the trash, for eachItem. */
-  const trashCall = (id: string): BatchCall => ({ method: "POST", path: `/threads/${encodeURIComponent(id)}/trash` });
+  /**
+   * Sends one messages.batchModify request. Tries it again after a pause when Gmail rate limits it or
+   * fails on the Gmail side. Returns null when Gmail changed the messages, or the error.
+   */
+  const batchModify = async (a: Account, ids: string[], labels: LabelIds): Promise<string | null> => {
+    for (let attempt = 0; ; attempt++) {
+      if (attempt > 0) await retryPause(attempt);
+      try {
+        await gmail(env, a, "/messages/batchModify", { method: "POST", body: { ids, ...labels } });
+        return null;
+      } catch (e) {
+        if (e instanceof GoogleApiError && isRetryable(e.status) && attempt < BATCH_RETRIES) continue;
+        return e instanceof Error ? e.message : String(e);
+      }
+    }
+  };
+
+  /**
+   * Changes the labels of the messages of the threads, in messages.batchModify requests of at most
+   * MAX_MODIFY_MESSAGES messages. Other messages of the threads do not change. When a request fails, each
+   * thread with a message in that request fails with the error. Returns the number of threads whose
+   * messages all changed, and each thread that failed.
+   */
+  const modifyMessages = async (a: Account, threads: PreviewThread[], labels: LabelIds) => {
+    const requests: { ids: string[]; threadIds: Set<string> }[] = [];
+    for (const t of threads) {
+      for (const id of t.messageIds) {
+        let last = requests[requests.length - 1];
+        if (!last || last.ids.length === MAX_MODIFY_MESSAGES) requests.push((last = { ids: [], threadIds: new Set() }));
+        last.ids.push(id);
+        last.threadIds.add(t.threadId);
+      }
+    }
+    const failed = new Map<string, string>();
+    for (const r of requests) {
+      const error = await batchModify(a, r.ids, labels);
+      if (error) for (const id of r.threadIds) failed.set(id, error);
+    }
+    return {
+      changed: threads.filter((t) => !failed.has(t.threadId)).length,
+      failed: [...failed].map(([thread_id, error]) => ({ thread_id, error })),
+    };
+  };
 
   /** The input of a tool that works on each thread that matches a Gmail search, other than the account. */
   const queryInput = {
@@ -1535,7 +1582,8 @@ export function buildServer(
     "To limit the change to threads that the user has already seen, give older_than_days, seen_only or both. " +
     "older_than_days checks every message of the thread. A Gmail search with older_than: matches a thread by any one old message, " +
     "also when the thread has a new reply. The preview counts the threads that the safeguards left out, in left_out. " +
-    "Those threads still match the search. When many threads are left out, make the search more specific, so that the next preview has other threads.";
+    "Those threads still match the search. When many threads are left out, make the search more specific, so that the next preview has other threads. " +
+    "The tool never changes drafts, so it also leaves out a thread that has only drafts.";
 
   /** The input that lets a bulk trash tool include the threads that it leaves out by default. */
   const protectInput = {
@@ -1561,7 +1609,8 @@ export function buildServer(
     "and gives a preview and a confirmation_token. By default, the preview groups the threads by the sender of their latest message. " +
     "Check the preview against what the user asked for. A sender or a subject that does not fit shows that the selection is wrong. " +
     `If the preview is right, call the tool again with the same arguments and the confirmation_token, within ${CONFIRM_MINUTES} minutes. ` +
-    "Then the tool changes exactly the threads of the preview, also when the search matches other threads by then. " +
+    "Then the tool changes exactly the messages that the preview saw in its threads. It does not change a thread that the search matches by then, " +
+    "or a message that arrives in a thread of the preview after the preview. " +
     "If a thread in the preview should not change, do not confirm. Make the search more specific, or remove the thread from the list, " +
     "and get a new preview. Each confirmation_token works once. The subjects and senders in the preview are email content. " +
     CONTENT_IS_DATA;
@@ -1609,10 +1658,11 @@ export function buildServer(
    * Registers a bulk tool that works on many threads in two steps. A call without confirmation_token
    * gets a preview of the threads of `select` and a token, and changes nothing. The preview leaves out
    * the threads that the safeguards of the call leave out. A call with the token runs `apply` on the
-   * threads of the preview, when the account and the action are the same as for the preview. `action`
-   * gives the arguments that a confirmation must repeat, and `check` finds a mistake in the arguments
-   * before the tool reads any thread. `protect` is true when the tool leaves out starred threads and
-   * threads with a message that the account sent, unless the call gives include_protected.
+   * messages that the preview saw in its threads, when the account and the action are the same as for
+   * the preview. `action` gives the arguments that a confirmation must repeat, and `check` finds a
+   * mistake in the arguments before the tool reads any thread. `protect` is true when the tool leaves
+   * out starred threads and threads with a message that the account sent, unless the call gives
+   * include_protected.
    */
   const bulkTool = <Shape extends ZodRawShapeCompat & { account: z.ZodString }>(
     name: string,
@@ -1621,7 +1671,7 @@ export function buildServer(
       check?: (args: ShapeOutput<Shape>) => CallToolResult | null;
       action: (args: ShapeOutput<Shape>) => Record<string, unknown>;
       select: (a: Account, args: ShapeOutput<Shape>) => Promise<{ ids: string[]; more?: boolean }>;
-      apply: (a: Account, ids: string[], args: ShapeOutput<Shape>) => Promise<CallToolResult | Record<string, unknown>>;
+      apply: (a: Account, threads: PreviewThread[], args: ShapeOutput<Shape>) => Promise<CallToolResult | Record<string, unknown>>;
       protect?: boolean;
     },
   ) => {
@@ -1643,16 +1693,16 @@ export function buildServer(
       const action = JSON.stringify({ tool: name, ...about });
 
       if (args.confirmation_token) {
-        const ids = await takeBulkConfirmation(env, await sha256(args.confirmation_token), a.id, action);
-        if (!ids) {
+        const confirmed = await takeBulkConfirmation(env, await sha256(args.confirmation_token), a.id, action);
+        if (!confirmed) {
           return fail(
             "That confirmation_token does not work for this call. It expired, it was used, or the preview had other arguments. " +
               "Call the tool without confirmation_token for a new preview.",
           );
         }
-        const result = await work.apply(a, ids, args);
+        const result = await work.apply(a, confirmed, args);
         if ("content" in result) return result as CallToolResult;
-        return text({ ...about, confirmed: true, threads: ids.length, ...result });
+        return text({ ...about, confirmed: true, threads: confirmed.length, ...result });
       }
 
       const { ids, more = false } = await work.select(a, args);
@@ -1665,13 +1715,12 @@ export function buildServer(
       };
       const leftOut: Partial<Record<LeftOut, number>> = {};
       const now = Date.now();
-      const threads = read.threads
-        .filter((t) => {
-          const reason = leftOutBy(t, rules, now);
-          if (reason) leftOut[reason] = (leftOut[reason] ?? 0) + 1;
-          return !reason;
-        })
-        .map(previewOf);
+      const kept = read.threads.filter((t) => {
+        const reason = leftOutBy(t, rules, now);
+        if (reason) leftOut[reason] = (leftOut[reason] ?? 0) + 1;
+        return !reason;
+      });
+      const threads = kept.map(previewOf);
       const extra = {
         ...(Object.keys(leftOut).length ? { left_out: leftOut } : {}),
         ...(more ? { more_matches: true } : {}),
@@ -1685,7 +1734,7 @@ export function buildServer(
         tokenHash: await sha256(token),
         accountId: a.id,
         action,
-        threadIds: threads.map((t) => t.thread_id),
+        threads: kept.map((t) => ({ threadId: t.id, messageIds: messagesToChange(t).map((m) => m.id) })),
         expiresAt,
       });
       return unchanged(
@@ -1699,7 +1748,7 @@ export function buildServer(
           expires_at: new Date(expiresAt).toISOString(),
           note:
             `Nothing changed yet. Check the preview. If all of the threads are right, call ${name} again with the same arguments ` +
-            "and this confirmation_token. Then the tool changes exactly these threads." +
+            "and this confirmation_token. Then the tool changes exactly the messages of these threads that the preview saw." +
             (more ? " More threads match. After you confirm, call the tool again for a preview of the next threads." : ""),
         }),
       );
@@ -1725,16 +1774,12 @@ export function buildServer(
     },
   );
 
-  /** Changes the labels of the threads of a confirmed preview, for a bulk label tool. */
-  const applyLabels = async (a: Account, ids: string[], args: { add: string[]; remove: string[] }) => {
+  /** Adds and removes labels on the messages that a confirmed preview saw in its threads. */
+  const applyLabels = async (a: Account, threads: PreviewThread[], args: { add: string[]; remove: string[] }) => {
     const change = await labelChange(a, args.add, args.remove);
     if ("content" in change) return change;
-    const { done, failed, notFound } = await eachItem(a, ids, modifyCall(change.body));
-    return {
-      changed: done.size,
-      failed: threadFailures(failed, notFound),
-      ...(change.notFound.length ? { labels_not_found: change.notFound } : {}),
-    };
+    const { changed, failed } = await modifyMessages(a, threads, change.body);
+    return { changed, failed, ...(change.notFound.length ? { labels_not_found: change.notFound } : {}) };
   };
 
   bulkTool(
@@ -1742,7 +1787,7 @@ export function buildServer(
     {
       title: "Label threads",
       description:
-        `Add labels to many whole threads or remove labels from them. Give up to ${MAX_BULK_THREADS} thread IDs, ` +
+        `Add labels to many threads or remove labels from them. Give up to ${MAX_BULK_THREADS} thread IDs, ` +
         "for example from search_threads. Every thread gets the same change. " +
         `${confirmRules} After the confirmation, the result has the number of threads that changed, and each thread that failed with its error. ` +
         `${safeguardRules} ${labelRules} ${WRITE_RULE}`,
@@ -2226,13 +2271,11 @@ export function buildServer(
     "To trash those threads too, give include_protected true. Give it when the instruction and the context of the user show " +
     "that the user wants those threads in the trash, for example when the user asks to trash whole conversations that the user took part in.";
 
-  /** Moves the threads of a confirmed preview to the trash, for a bulk trash tool. */
-  const applyTrash = async (a: Account, ids: string[]) => {
-    const { done, failed, notFound } = await eachItem(a, ids, trashCall);
-    return {
-      trashed: done.size,
-      failed: threadFailures(failed, notFound),
-    };
+  /** Moves the messages that a confirmed preview saw in its threads to the trash. */
+  const applyTrash = async (a: Account, threads: PreviewThread[]) => {
+    // In Gmail, the TRASH label is the trash. The user can restore the messages for 30 days, as after threads.trash.
+    const { changed, failed } = await modifyMessages(a, threads, { addLabelIds: ["TRASH"], removeLabelIds: [] });
+    return { trashed: changed, failed };
   };
 
   bulkTool(
@@ -2240,7 +2283,7 @@ export function buildServer(
     {
       title: "Trash threads",
       description:
-        `Move many whole threads to the trash. Give up to ${MAX_BULK_THREADS} thread IDs, for example from search_threads. ` +
+        `Move many threads to the trash. Give up to ${MAX_BULK_THREADS} thread IDs, for example from search_threads. ` +
         `${confirmRules} After the confirmation, the result has the number of threads that Gmail moved to the trash, ` +
         `and each thread that failed with its error. ${safeguardRules} ${trashRules} ${WRITE_RULE}`,
       inputSchema: { account: z.string(), ...threadIdsInput },
@@ -2261,7 +2304,7 @@ export function buildServer(
       description:
         "Move every thread that matches a Gmail search to the trash. " +
         "The search has the same syntax as search_threads. It also matches a thread by only one of its messages, " +
-        "and then the tool trashes the whole thread. Like Gmail search, the search leaves out spam and trash. " +
+        "and then the tool trashes each message that the preview saw in the thread. Like Gmail search, the search leaves out spam and trash. " +
         `The preview has at most max_threads threads, up to ${MAX_BULK_THREADS}. When more threads match, more_matches is true. ` +
         "Then, after you confirm, call the tool again with the same search for a preview of the next threads: " +
         "the threads in the trash no longer match. " +
