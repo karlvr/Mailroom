@@ -30,7 +30,7 @@ import {
   recordAccountCall,
   recordToolList,
 } from "./db";
-import { AccountNeedsRelink, GoogleApiError, calendar, gmail, gmailUpload, hasCalendar } from "./google";
+import { AccountNeedsRelink, GoogleApiError, calendar, gmail, gmailBatch, gmailUpload, hasCalendar } from "./google";
 import {
   attachmentParts,
   buildMessage,
@@ -101,6 +101,17 @@ const MAX_RELEASE_DAYS = 10;
 // Worker memory while it builds the draft, so the limit is lower than the Gmail limit.
 const MAX_FORWARD_ATTACHMENT_MB = 10;
 
+// The largest number of threads that one call of a bulk label tool changes. With batches of
+// BATCH_SIZE, a call stays well within the 50 subrequests that the Workers Free plan allows.
+const MAX_BULK_THREADS = 500;
+
+// The number of label changes in one Gmail batch request. Each change uses 10 units of the Gmail
+// quota, and Gmail limits each user to 250 units each second, so larger batches get rate limited.
+const BATCH_SIZE = 25;
+
+// How many times a bulk label tool tries again the changes that Gmail rate limited or that failed on the Gmail side.
+const BATCH_RETRIES = 2;
+
 interface GmailMessage {
   id: string;
   threadId: string;
@@ -170,6 +181,15 @@ export interface McpCaller {
   clientId: string | null;
 }
 
+// The results of calls of a write tool that changed nothing, for example a dry run. These calls do not count as changes.
+const unchangedResults = new WeakSet<CallToolResult>();
+
+/** Marks the result of a call of a write tool that changed nothing, and returns it. */
+const unchanged = (result: CallToolResult): CallToolResult => {
+  unchangedResults.add(result);
+  return result;
+};
+
 /** The work of a tool in one account. It gets the account and the arguments of the call. */
 type AccountWork<A> = (a: Account, args: A) => Promise<CallToolResult>;
 
@@ -219,7 +239,8 @@ export function buildServer(
   /**
    * Registers a tool that works in one account. The tool finds the account from the `account` argument,
    * and `work` does the rest. Each call that finds the account counts in the usage of the account. A call
-   * that succeeds also counts as a change, unless the annotations of the tool have readOnlyHint.
+   * that succeeds also counts as a change, unless the annotations of the tool have readOnlyHint, or
+   * the work marks the result with `unchanged`.
    */
   const accountTool = <Shape extends ZodRawShapeCompat & { account: z.ZodString }>(
     name: string,
@@ -242,7 +263,7 @@ export function buildServer(
       let change = false;
       try {
         const result = await work(acct, args);
-        change = !readOnly && !result.isError;
+        change = !readOnly && !result.isError && !unchangedResults.has(result);
         return result;
       } catch (e) {
         if (e instanceof AccountNeedsRelink || e instanceof GoogleApiError) return fail(e.message);
@@ -587,48 +608,221 @@ export function buildServer(
       propose({ kind: "account", accountId: a.id }, { account: a.email }, args),
   );
 
+  /** The input of a tool that changes labels: the labels to add and to remove. */
+  const labelChangeInput = {
+    add: z.array(z.string()).default([]).describe("The names of the labels to add"),
+    remove: z.array(z.string()).default([]).describe("The names of the labels to remove. Remove INBOX to archive."),
+  };
+
+  /** The part of a description of a tool that changes labels, about how it treats labels. */
+  const labelRules =
+    "Give each label by its name. If a user label that you add does not exist, the tool creates it. " +
+    "To nest a label, use '/', for example 'Agent/Action'. " +
+    "You can also give system labels, for example INBOX, UNREAD, STARRED and IMPORTANT. To archive a thread, remove INBOX. " +
+    `The tool rejects these labels: ${[...FORBIDDEN_LABELS].join(", ")}. To trash a thread, use trash_thread.`;
+
+  /** Returns a failure when a label is forbidden, or when there is nothing to change, and otherwise null. */
+  const labelProblem = (add: string[], remove: string[]): CallToolResult | null => {
+    const bad = [...add, ...remove].filter((n) => FORBIDDEN_LABELS.has(n.toUpperCase()));
+    if (bad.length) return fail(`This tool cannot add or remove these labels: ${bad.join(", ")}. To trash a thread, use trash_thread.`);
+    if (!add.length && !remove.length) return fail("Give at least one label to add or to remove.");
+    return null;
+  };
+
+  /**
+   * Returns the IDs of the labels to add and to remove, and creates each user label to add that does
+   * not exist. Returns a failure when a label is forbidden, or when there is nothing to change.
+   * `not_found` has the labels to remove that do not exist. No thread has them, so there is nothing to remove.
+   */
+  const labelChange = async (
+    a: Account,
+    add: string[],
+    remove: string[],
+  ): Promise<{ body: { addLabelIds: string[]; removeLabelIds: string[] }; notFound: string[] } | CallToolResult> => {
+    const problem = labelProblem(add, remove);
+    if (problem) return problem;
+    const { byName } = await labelMap(env, a);
+    const create = async (name: string): Promise<string> => {
+      const hit = byName.get(name.toLowerCase());
+      if (hit) return hit.id;
+      const made = await gmail<GmailLabel>(env, a, "/labels", {
+        method: "POST",
+        body: { name, labelListVisibility: "labelShow", messageListVisibility: "show" },
+      });
+      byName.set(name.toLowerCase(), made);
+      return made.id;
+    };
+    // Create the labels one at a time, so that two names that differ only in case make one label.
+    const addLabelIds: string[] = [];
+    for (const n of add) addLabelIds.push(await create(n));
+    const notFound = remove.filter((n) => !byName.has(n.toLowerCase()));
+    const removeLabelIds = remove.flatMap((n) => byName.get(n.toLowerCase())?.id ?? []);
+    return { body: { addLabelIds, removeLabelIds }, notFound };
+  };
+
+  /**
+   * Changes the labels of many threads with Gmail batch requests. Tries each call that Gmail limits
+   * or that fails on the Gmail side again, after a pause. Returns the threads that it changed and the
+   * threads that failed, with the error of each.
+   */
+  const modifyThreads = async (
+    a: Account,
+    threadIds: string[],
+    body: { addLabelIds: string[]; removeLabelIds: string[] },
+  ): Promise<{ changed: number; failed: { thread_id: string; error: string }[] }> => {
+    let pending = [...new Set(threadIds)];
+    let changed = 0;
+    const failed = new Map<string, string>();
+    for (let attempt = 0; attempt <= BATCH_RETRIES && pending.length; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
+      const retry: string[] = [];
+      for (let i = 0; i < pending.length; i += BATCH_SIZE) {
+        const ids = pending.slice(i, i + BATCH_SIZE);
+        const results = await gmailBatch(
+          env,
+          a,
+          ids.map((id) => ({ method: "POST", path: `/threads/${encodeURIComponent(id)}/modify`, body })),
+        );
+        results.forEach((r, j) => {
+          const id = ids[j]!;
+          if (!r.error) {
+            changed++;
+            failed.delete(id);
+            return;
+          }
+          failed.set(id, r.error);
+          if (r.status === 0 || r.status === 429 || r.status >= 500) retry.push(id);
+        });
+      }
+      pending = retry;
+    }
+    return { changed, failed: [...failed].map(([thread_id, error]) => ({ thread_id, error })) };
+  };
+
   accountTool(
     "modify_thread_labels",
     {
       title: "Label thread",
       description:
-        "Add labels to a whole thread or remove labels from it. Give each label by its name. " +
-        "If a user label that you add does not exist, the tool creates it. To nest a label, use '/', for example 'Agent/Action'. " +
-        "You can also give system labels, for example INBOX, UNREAD, STARRED and IMPORTANT. To archive a thread, remove INBOX. " +
-        `The tool rejects these labels: ${[...FORBIDDEN_LABELS].join(", ")}. To trash a thread, use trash_thread. ` +
-        WRITE_RULE,
-      inputSchema: {
-        account: z.string(),
-        thread_id: z.string(),
-        add: z.array(z.string()).default([]),
-        remove: z.array(z.string()).default([]),
-      },
+        "Add labels to a whole thread or remove labels from it. " +
+        "To change many threads in one call, use modify_threads_labels with a list of thread IDs, " +
+        `or modify_labels_by_query with a Gmail search. ${labelRules} ${WRITE_RULE}`,
+      inputSchema: { account: z.string(), thread_id: z.string(), ...labelChangeInput },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async (a, args: { account: string; thread_id: string; add: string[]; remove: string[] }) => {
-      const bad = [...args.add, ...args.remove].filter((n) => FORBIDDEN_LABELS.has(n.toUpperCase()));
-      if (bad.length) {
-        return fail(`This tool cannot add or remove these labels: ${bad.join(", ")}. To trash a thread, use trash_thread.`);
-      }
-      const { byName } = await labelMap(env, a);
-      const resolve = async (name: string, create: boolean): Promise<string | null> => {
-        const hit = byName.get(name.toLowerCase());
-        if (hit) return hit.id;
-        if (!create) return null;
-        const made = await gmail<GmailLabel>(env, a, "/labels", {
-          method: "POST",
-          body: { name, labelListVisibility: "labelShow", messageListVisibility: "show" },
-        });
-        byName.set(name.toLowerCase(), made);
-        return made.id;
-      };
-      const addIds = (await Promise.all(args.add.map((n) => resolve(n, true)))).filter(Boolean) as string[];
-      const removeIds = (await Promise.all(args.remove.map((n) => resolve(n, false)))).filter(Boolean) as string[];
-      await gmail(env, a, `/threads/${encodeURIComponent(args.thread_id)}/modify`, {
-        method: "POST",
-        body: { addLabelIds: addIds, removeLabelIds: removeIds },
-      });
+      const change = await labelChange(a, args.add, args.remove);
+      if ("content" in change) return change;
+      await gmail(env, a, `/threads/${encodeURIComponent(args.thread_id)}/modify`, { method: "POST", body: change.body });
       return text({ account: a.email, thread_id: args.thread_id, added: args.add, removed: args.remove });
+    },
+  );
+
+  accountTool(
+    "modify_threads_labels",
+    {
+      title: "Label threads",
+      description:
+        `Add labels to many whole threads or remove labels from them, in one call. Give up to ${MAX_BULK_THREADS} thread IDs, ` +
+        "for example from search_threads. Every thread gets the same change. " +
+        "The result has the number of threads that changed, and each thread that failed with its error. " +
+        `${labelRules} ${WRITE_RULE}`,
+      inputSchema: {
+        account: z.string(),
+        thread_ids: z.array(z.string().min(1)).min(1).max(MAX_BULK_THREADS).describe("The IDs of the threads to change"),
+        ...labelChangeInput,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async (a, args: { account: string; thread_ids: string[]; add: string[]; remove: string[] }) => {
+      const change = await labelChange(a, args.add, args.remove);
+      if ("content" in change) return change;
+      const { changed, failed } = await modifyThreads(a, args.thread_ids, change.body);
+      return text({
+        account: a.email,
+        threads: new Set(args.thread_ids).size,
+        changed,
+        failed,
+        added: args.add,
+        removed: args.remove,
+        ...(change.notFound.length ? { labels_not_found: change.notFound } : {}),
+      });
+    },
+  );
+
+  accountTool(
+    "modify_labels_by_query",
+    {
+      title: "Label threads by search",
+      description:
+        "Add labels to every thread that matches a Gmail search, or remove labels from those threads, in one call. " +
+        "The search has the same syntax as search_threads, for example `subject:\"PopularityService failure\" in:inbox`. " +
+        "Every matching thread gets the same change, also a thread that matches only by one of its messages. " +
+        "Like Gmail search, the search leaves out spam and trash. " +
+        `The tool changes at most max_threads threads, up to ${MAX_BULK_THREADS}. ` +
+        "When more threads match, more_matches is true. Then call the tool again. To skip the threads that changed, " +
+        "make the search leave them out, for example with -label:Name after you add that label. " +
+        "When you are not sure what the search matches, first call the tool with dry_run, which changes nothing and gives the matches. " +
+        "The result has the number of matching threads, the number that changed, and each thread that failed with its error. " +
+        `${labelRules} ${WRITE_RULE}`,
+      inputSchema: {
+        account: z.string(),
+        query: z
+          .string()
+          .trim()
+          .min(1)
+          .describe("A Gmail search query. Make it specific. A broad search changes many threads."),
+        ...labelChangeInput,
+        max_threads: z
+          .number()
+          .int()
+          .min(1)
+          .max(MAX_BULK_THREADS)
+          .default(MAX_BULK_THREADS)
+          .describe("The largest number of threads to change"),
+        dry_run: z
+          .boolean()
+          .default(false)
+          .describe("When true, the tool changes nothing. It gives the number of matching threads and their IDs."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async (
+      a,
+      args: { account: string; query: string; add: string[]; remove: string[]; max_threads: number; dry_run: boolean },
+    ) => {
+      // Check the labels before the search, so that a dry run also finds a mistake in them.
+      const problem = labelProblem(args.add, args.remove);
+      if (problem) return problem;
+
+      const ids: string[] = [];
+      let pageToken: string | undefined;
+      let more = false;
+      do {
+        const list = await gmail<{ threads?: { id: string }[]; nextPageToken?: string }>(env, a, "/threads", {
+          query: { q: args.query, maxResults: String(Math.min(500, args.max_threads - ids.length + 1)), pageToken },
+        });
+        for (const t of list.threads ?? []) {
+          if (ids.length < args.max_threads) ids.push(t.id);
+          else more = true;
+        }
+        pageToken = list.nextPageToken;
+      } while (pageToken && !more && ids.length < args.max_threads);
+      more ||= !!pageToken;
+
+      const base = { account: a.email, query: args.query, matched: ids.length, more_matches: more, added: args.add, removed: args.remove };
+      if (args.dry_run) return unchanged(text({ ...base, dry_run: true, thread_ids: ids }));
+      if (!ids.length) return unchanged(text({ ...base, changed: 0, failed: [] }));
+
+      const change = await labelChange(a, args.add, args.remove);
+      if ("content" in change) return change;
+      const { changed, failed } = await modifyThreads(a, ids, change.body);
+      return text({
+        ...base,
+        changed,
+        failed,
+        ...(change.notFound.length ? { labels_not_found: change.notFound } : {}),
+      });
     },
   );
 
