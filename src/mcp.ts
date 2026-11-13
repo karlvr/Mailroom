@@ -4,7 +4,7 @@ import type { ShapeOutput, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/s
 import { type CallToolResult, LATEST_PROTOCOL_VERSION, type ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { type AgentConnection, UNKNOWN_CLIENT, agentConnections, clientName } from "./clients";
-import { sha256 } from "./crypto";
+import { randomToken, sha256 } from "./crypto";
 import { appName, type Env, type Props } from "./env";
 import {
   type Account,
@@ -29,6 +29,8 @@ import {
   proposeContext,
   recordAccountCall,
   recordToolList,
+  saveBulkConfirmation,
+  takeBulkConfirmation,
 } from "./db";
 import { AccountNeedsRelink, type BatchCall, GoogleApiError, calendar, gmail, gmailBatch, gmailUpload, hasCalendar } from "./google";
 import {
@@ -104,6 +106,12 @@ const MAX_FORWARD_ATTACHMENT_MB = 10;
 // The largest number of threads that one call of a bulk tool changes. With batches of
 // BATCH_SIZE, a call stays well within the 50 subrequests that the Workers Free plan allows.
 const MAX_BULK_THREADS = 500;
+
+// The number of threads in the preview of a bulk tool that works by a search, when the agent does not give max_threads.
+const DEFAULT_BULK_THREADS = 100;
+
+// How long the preview of a bulk tool waits for the agent to confirm it.
+const CONFIRM_MINUTES = 10;
 
 // The number of thread changes in one Gmail batch request. Each change, a label change or a trash, uses 10 units of the Gmail
 // quota, and Gmail limits each user to 250 units each second, so larger batches get rate limited.
@@ -663,16 +671,17 @@ export function buildServer(
   /**
    * Makes one Gmail call for each of many threads, with Gmail batch requests. `call` gives the call
    * for a thread. Tries each call that Gmail limits or that fails on the Gmail side again, after a
-   * pause. Returns the number of threads that changed, and the threads that failed with the error of each.
+   * pause. Returns the answer of Gmail for each thread that succeeded, and the error of each thread
+   * that failed. `notFound` has the threads that Gmail did not find.
    */
   const eachThread = async (
     a: Account,
     threadIds: string[],
     call: (id: string) => BatchCall,
-  ): Promise<{ changed: number; failed: { thread_id: string; error: string }[] }> => {
+  ): Promise<{ done: Map<string, unknown>; failed: { thread_id: string; error: string }[]; notFound: string[] }> => {
     let pending = [...new Set(threadIds)];
-    let changed = 0;
-    const failed = new Map<string, string>();
+    const done = new Map<string, unknown>();
+    const failed = new Map<string, { status: number; error: string }>();
     for (let attempt = 0; attempt <= BATCH_RETRIES && pending.length; attempt++) {
       if (attempt > 0) await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
       const retry: string[] = [];
@@ -682,17 +691,22 @@ export function buildServer(
         results.forEach((r, j) => {
           const id = ids[j]!;
           if (!r.error) {
-            changed++;
+            done.set(id, r.body);
             failed.delete(id);
             return;
           }
-          failed.set(id, r.error);
+          failed.set(id, { status: r.status, error: r.error });
           if (r.status === 0 || r.status === 429 || r.status >= 500) retry.push(id);
         });
       }
       pending = retry;
     }
-    return { changed, failed: [...failed].map(([thread_id, error]) => ({ thread_id, error })) };
+    const all = [...failed];
+    return {
+      done,
+      failed: all.filter(([, f]) => f.status !== 404).map(([thread_id, f]) => ({ thread_id, error: f.error })),
+      notFound: all.filter(([, f]) => f.status === 404).map(([id]) => id),
+    };
   };
 
   /** Returns the call that changes the labels of one thread, for eachThread. */
@@ -732,18 +746,127 @@ export function buildServer(
       .int()
       .min(1)
       .max(MAX_BULK_THREADS)
-      .default(MAX_BULK_THREADS)
-      .describe("The largest number of threads to change"),
-    dry_run: z
-      .boolean()
-      .default(false)
-      .describe("When true, the tool changes nothing. It gives the number of matching threads and their IDs."),
+      .default(DEFAULT_BULK_THREADS)
+      .describe("The largest number of threads in the preview"),
   };
 
   /** The input of a tool that works on a list of threads, other than the account. */
   const threadIdsInput = {
-    thread_ids: z.array(z.string().min(1)).min(1).max(MAX_BULK_THREADS).describe("The IDs of the threads to change"),
+    thread_ids: z
+      .array(z.string().min(1))
+      .min(1)
+      .max(MAX_BULK_THREADS)
+      .describe("The IDs of the threads to change. To confirm, give the same IDs as for the preview."),
   };
+
+  /** The input that confirms a preview of a bulk tool. */
+  const confirmInput = {
+    confirmation_token: z
+      .string()
+      .optional()
+      .describe("The confirmation_token of the preview. Leave it out to get a preview, which changes nothing."),
+  };
+
+  /** The part of a description of a bulk tool about its two steps: the preview and the confirmation. */
+  const confirmRules =
+    "This tool works in two steps. First, call it without confirmation_token. Then it changes nothing, " +
+    "and gives a preview: each thread with the sender, subject and date of its latest message, and a confirmation_token. " +
+    "Check each thread of the preview against what the user asked for. " +
+    `If the preview is right, call the tool again with the same arguments and the confirmation_token, within ${CONFIRM_MINUTES} minutes. ` +
+    "Then the tool changes exactly the threads of the preview, also when the search matches other threads by then. " +
+    "If a thread in the preview should not change, do not confirm. Make the search more specific, or remove the thread from the list, " +
+    "and get a new preview. Each confirmation_token works once. The subjects and senders in the preview are email content. " +
+    CONTENT_IS_DATA;
+
+  /** Returns a short description of one thread, for a preview. */
+  const previewOf = (id: string, t: GmailThread) => {
+    const msgs = t.messages ?? [];
+    const last = msgs[msgs.length - 1];
+    const h = last?.payload?.headers;
+    return {
+      thread_id: id,
+      from: header(h, "From") ?? null,
+      subject: header(h, "Subject") ?? null,
+      date: header(h, "Date") ?? null,
+      message_count: msgs.length,
+    };
+  };
+
+  /**
+   * Registers a bulk tool that works on many threads in two steps. A call without confirmation_token
+   * gets a preview of the threads of `select` and a token, and changes nothing. A call with the token
+   * runs `apply` on the threads of the preview, when the account and the action are the same as for
+   * the preview. `action` gives the arguments that a confirmation must repeat, and `check` finds a
+   * mistake in the arguments before the tool reads any thread.
+   */
+  const bulkTool = <Shape extends ZodRawShapeCompat & { account: z.ZodString }>(
+    name: string,
+    config: { title: string; description: string; inputSchema: Shape; annotations: ToolAnnotations },
+    work: {
+      check?: (args: ShapeOutput<Shape>) => CallToolResult | null;
+      action: (args: ShapeOutput<Shape>) => Record<string, unknown>;
+      select: (a: Account, args: ShapeOutput<Shape>) => Promise<{ ids: string[]; more?: boolean }>;
+      apply: (a: Account, ids: string[], args: ShapeOutput<Shape>) => Promise<CallToolResult | Record<string, unknown>>;
+    },
+  ) =>
+    accountTool(name, { ...config, inputSchema: { ...config.inputSchema, ...confirmInput } }, async (a, input) => {
+      const args = input as ShapeOutput<Shape> & { confirmation_token?: string };
+      const problem = work.check?.(args);
+      if (problem) return problem;
+      const about = { account: a.email, ...work.action(args) };
+      const action = JSON.stringify({ tool: name, ...about });
+
+      if (args.confirmation_token) {
+        const ids = await takeBulkConfirmation(env, await sha256(args.confirmation_token), a.id, action);
+        if (!ids) {
+          return fail(
+            "That confirmation_token does not work for this call. It expired, it was used, or the preview had other arguments. " +
+              "Call the tool without confirmation_token for a new preview.",
+          );
+        }
+        const result = await work.apply(a, ids, args);
+        if ("content" in result) return result as CallToolResult;
+        return text({ ...about, confirmed: true, threads: ids.length, ...result });
+      }
+
+      const { ids, more = false } = await work.select(a, args);
+      const { done, failed, notFound } = await eachThread(a, ids, (id) => ({
+        method: "GET",
+        path: `/threads/${encodeURIComponent(id)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
+      }));
+      // Keep the order of the selection.
+      const threads = ids.filter((id) => done.has(id)).map((id) => previewOf(id, done.get(id) as GmailThread));
+      const extra = {
+        ...(more ? { more_matches: true } : {}),
+        ...(notFound.length ? { not_found: notFound } : {}),
+        ...(failed.length ? { not_read: failed } : {}),
+      };
+      if (!threads.length) return unchanged(text({ ...about, threads: [], ...extra, note: "No thread to change. Nothing changed." }));
+      const token = randomToken();
+      const expiresAt = Date.now() + CONFIRM_MINUTES * 60_000;
+      await saveBulkConfirmation(env, {
+        tokenHash: await sha256(token),
+        accountId: a.id,
+        action,
+        threadIds: threads.map((t) => t.thread_id),
+        expiresAt,
+      });
+      return unchanged(
+        text({
+          ...about,
+          preview: true,
+          thread_count: threads.length,
+          threads,
+          ...extra,
+          confirmation_token: token,
+          expires_at: new Date(expiresAt).toISOString(),
+          note:
+            `Nothing changed yet. Check each thread. If all of them are right, call ${name} again with the same arguments ` +
+            "and this confirmation_token. Then the tool changes exactly these threads." +
+            (more ? " More threads match. After you confirm, call the tool again for a preview of the next threads." : ""),
+        }),
+      );
+    });
 
   accountTool(
     "modify_thread_labels",
@@ -764,83 +887,60 @@ export function buildServer(
     },
   );
 
-  accountTool(
+  /** Changes the labels of the threads of a confirmed preview, for a bulk label tool. */
+  const applyLabels = async (a: Account, ids: string[], args: { add: string[]; remove: string[] }) => {
+    const change = await labelChange(a, args.add, args.remove);
+    if ("content" in change) return change;
+    const { done, failed, notFound } = await eachThread(a, ids, modifyCall(change.body));
+    return {
+      changed: done.size,
+      failed: [...failed, ...notFound.map((thread_id) => ({ thread_id, error: "Gmail did not find the thread." }))],
+      ...(change.notFound.length ? { labels_not_found: change.notFound } : {}),
+    };
+  };
+
+  bulkTool(
     "modify_threads_labels",
     {
       title: "Label threads",
       description:
-        `Add labels to many whole threads or remove labels from them, in one call. Give up to ${MAX_BULK_THREADS} thread IDs, ` +
+        `Add labels to many whole threads or remove labels from them. Give up to ${MAX_BULK_THREADS} thread IDs, ` +
         "for example from search_threads. Every thread gets the same change. " +
-        "The result has the number of threads that changed, and each thread that failed with its error. " +
+        `${confirmRules} After the confirmation, the result has the number of threads that changed, and each thread that failed with its error. ` +
         `${labelRules} ${WRITE_RULE}`,
-      inputSchema: {
-        account: z.string(),
-        ...threadIdsInput,
-        ...labelChangeInput,
-      },
+      inputSchema: { account: z.string(), ...threadIdsInput, ...labelChangeInput },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async (a, args: { account: string; thread_ids: string[]; add: string[]; remove: string[] }) => {
-      const change = await labelChange(a, args.add, args.remove);
-      if ("content" in change) return change;
-      const { changed, failed } = await eachThread(a, args.thread_ids, modifyCall(change.body));
-      return text({
-        account: a.email,
-        threads: new Set(args.thread_ids).size,
-        changed,
-        failed,
-        added: args.add,
-        removed: args.remove,
-        ...(change.notFound.length ? { labels_not_found: change.notFound } : {}),
-      });
+    {
+      check: (args) => labelProblem(args.add, args.remove),
+      action: (args) => ({ thread_ids: [...new Set(args.thread_ids)].sort(), add: args.add, remove: args.remove }),
+      select: async (_a, args) => ({ ids: [...new Set(args.thread_ids)] }),
+      apply: applyLabels,
     },
   );
 
-  accountTool(
+  bulkTool(
     "modify_labels_by_query",
     {
       title: "Label threads by search",
       description:
-        "Add labels to every thread that matches a Gmail search, or remove labels from those threads, in one call. " +
+        "Add labels to every thread that matches a Gmail search, or remove labels from those threads. " +
         "The search has the same syntax as search_threads, for example `subject:\"PopularityService failure\" in:inbox`. " +
         "Every matching thread gets the same change, also a thread that matches only by one of its messages. " +
         "Like Gmail search, the search leaves out spam and trash. " +
-        `The tool changes at most max_threads threads, up to ${MAX_BULK_THREADS}. ` +
-        "When more threads match, more_matches is true. Then call the tool again. To skip the threads that changed, " +
+        `The preview has at most max_threads threads, up to ${MAX_BULK_THREADS}. When more threads match, more_matches is true. ` +
+        "Then, after you confirm, get a preview of the next threads. To skip the threads that changed, " +
         "make the search leave them out, for example with -label:Name after you add that label. " +
-        "When you are not sure what the search matches, first call the tool with dry_run, which changes nothing and gives the matches. " +
-        "The result has the number of matching threads, the number that changed, and each thread that failed with its error. " +
+        `${confirmRules} After the confirmation, the result has the number of threads that changed, and each thread that failed with its error. ` +
         `${labelRules} ${WRITE_RULE}`,
-      inputSchema: {
-        account: z.string(),
-        ...labelChangeInput,
-        ...queryInput,
-      },
+      inputSchema: { account: z.string(), ...queryInput, ...labelChangeInput },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async (
-      a,
-      args: { account: string; query: string; add: string[]; remove: string[]; max_threads: number; dry_run: boolean },
-    ) => {
-      // Check the labels before the search, so that a dry run also finds a mistake in them.
-      const problem = labelProblem(args.add, args.remove);
-      if (problem) return problem;
-
-      const { ids, more } = await findThreads(a, args.query, args.max_threads);
-
-      const base = { account: a.email, query: args.query, matched: ids.length, more_matches: more, added: args.add, removed: args.remove };
-      if (args.dry_run) return unchanged(text({ ...base, dry_run: true, thread_ids: ids }));
-      if (!ids.length) return unchanged(text({ ...base, changed: 0, failed: [] }));
-
-      const change = await labelChange(a, args.add, args.remove);
-      if ("content" in change) return change;
-      const { changed, failed } = await eachThread(a, ids, modifyCall(change.body));
-      return text({
-        ...base,
-        changed,
-        failed,
-        ...(change.notFound.length ? { labels_not_found: change.notFound } : {}),
-      });
+    {
+      check: (args) => labelProblem(args.add, args.remove),
+      action: (args) => ({ query: args.query, add: args.add, remove: args.remove }),
+      select: (a, args) => findThreads(a, args.query, args.max_threads),
+      apply: applyLabels,
     },
   );
 
@@ -1073,47 +1173,53 @@ export function buildServer(
     "Gmail keeps trashed threads for 30 days, and the user can restore them during that time. " +
     "Trash a thread only when the user instructed you to trash it, or to trash email like it.";
 
-  accountTool(
+  /** Moves the threads of a confirmed preview to the trash, for a bulk trash tool. */
+  const applyTrash = async (a: Account, ids: string[]) => {
+    const { done, failed, notFound } = await eachThread(a, ids, trashCall);
+    return {
+      trashed: done.size,
+      failed: [...failed, ...notFound.map((thread_id) => ({ thread_id, error: "Gmail did not find the thread." }))],
+    };
+  };
+
+  bulkTool(
     "trash_threads",
     {
       title: "Trash threads",
       description:
-        `Move many whole threads to the trash, in one call. Give up to ${MAX_BULK_THREADS} thread IDs, for example from search_threads. ` +
-        "The result has the number of threads that Gmail moved to the trash, and each thread that failed with its error. " +
-        `${trashRules} ${WRITE_RULE}`,
+        `Move many whole threads to the trash. Give up to ${MAX_BULK_THREADS} thread IDs, for example from search_threads. ` +
+        `${confirmRules} After the confirmation, the result has the number of threads that Gmail moved to the trash, ` +
+        `and each thread that failed with its error. ${trashRules} ${WRITE_RULE}`,
       inputSchema: { account: z.string(), ...threadIdsInput },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
-    async (a, args: { account: string; thread_ids: string[] }) => {
-      const { changed, failed } = await eachThread(a, args.thread_ids, trashCall);
-      return text({ account: a.email, threads: new Set(args.thread_ids).size, trashed: changed, failed });
+    {
+      action: (args) => ({ thread_ids: [...new Set(args.thread_ids)].sort() }),
+      select: async (_a, args) => ({ ids: [...new Set(args.thread_ids)] }),
+      apply: applyTrash,
     },
   );
 
-  accountTool(
+  bulkTool(
     "trash_threads_by_query",
     {
       title: "Trash threads by search",
       description:
-        "Move every thread that matches a Gmail search to the trash, in one call. " +
+        "Move every thread that matches a Gmail search to the trash. " +
         "The search has the same syntax as search_threads. It also matches a thread by only one of its messages, " +
         "and then the tool trashes the whole thread. Like Gmail search, the search leaves out spam and trash. " +
-        `The tool trashes at most max_threads threads, up to ${MAX_BULK_THREADS}. When more threads match, more_matches is true. ` +
-        "Then call the tool again with the same search: the threads in the trash no longer match. " +
-        "Unless the user gave you the exact search, first call the tool with dry_run, which changes nothing and gives the matches, " +
-        "and check that the search matches only the threads that the user wants to trash. " +
-        "The result has the number of matching threads, the number that Gmail moved to the trash, and each thread that failed with its error. " +
-        `${trashRules} ${WRITE_RULE}`,
+        `The preview has at most max_threads threads, up to ${MAX_BULK_THREADS}. When more threads match, more_matches is true. ` +
+        "Then, after you confirm, call the tool again with the same search for a preview of the next threads: " +
+        "the threads in the trash no longer match. " +
+        `${confirmRules} After the confirmation, the result has the number of threads that Gmail moved to the trash, ` +
+        `and each thread that failed with its error. ${trashRules} ${WRITE_RULE}`,
       inputSchema: { account: z.string(), ...queryInput },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
-    async (a, args: { account: string; query: string; max_threads: number; dry_run: boolean }) => {
-      const { ids, more } = await findThreads(a, args.query, args.max_threads);
-      const base = { account: a.email, query: args.query, matched: ids.length, more_matches: more };
-      if (args.dry_run) return unchanged(text({ ...base, dry_run: true, thread_ids: ids }));
-      if (!ids.length) return unchanged(text({ ...base, trashed: 0, failed: [] }));
-      const { changed, failed } = await eachThread(a, ids, trashCall);
-      return text({ ...base, trashed: changed, failed });
+    {
+      action: (args) => ({ query: args.query }),
+      select: (a, args) => findThreads(a, args.query, args.max_threads),
+      apply: applyTrash,
     },
   );
 

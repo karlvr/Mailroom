@@ -118,14 +118,14 @@ The agent then has these tools:
 | `get_thread` | Reads a whole thread as plain text |
 | `list_labels` | Lists the labels of one mailbox |
 | `modify_thread_labels` | Adds labels to a thread or removes labels from it. When it adds a label that does not exist, it creates that label. Removing `INBOX` archives the thread. The tool rejects `TRASH` and `SPAM`. |
-| `modify_threads_labels` | Makes the same label change to up to 500 threads in one call. You give a list of thread IDs. |
-| `modify_labels_by_query` | Makes the same label change to each thread that matches a Gmail search, up to 500 threads in one call. With `dry_run`, it changes nothing and gives the matching threads. |
+| `modify_threads_labels` | Makes the same label change to up to 500 threads. You give a list of thread IDs. It previews first: see below. |
+| `modify_labels_by_query` | Makes the same label change to each thread that matches a Gmail search, up to 500 threads. It previews first: see below. |
 | `create_draft` | Saves a new draft or a threaded reply. It does not send the draft. |
 | `create_forward_draft` | Saves a draft that forwards one message, with its attachments. It does not send the draft. |
 | `send_draft` | Sends a draft. It works only for a mailbox where you selected **Allow sending email**. |
 | `trash_thread` | Moves a thread to the trash. Gmail keeps trashed threads for 30 days. |
-| `trash_threads` | Moves up to 500 threads to the trash in one call. You give a list of thread IDs. |
-| `trash_threads_by_query` | Moves each thread that matches a Gmail search to the trash, up to 500 threads in one call. With `dry_run`, it changes nothing and gives the matching threads. |
+| `trash_threads` | Moves up to 500 threads to the trash. You give a list of thread IDs. It previews first: see below. |
+| `trash_threads_by_query` | Moves each thread that matches a Gmail search to the trash, up to 500 threads. It previews first: see below. |
 | `list_calendars` | Lists the calendars of one mailbox |
 | `list_events` | Lists the events of one calendar in a time range. It can also search the events. |
 | `get_event` | Reads one event, with its description as plain text and the reply of each guest |
@@ -134,6 +134,8 @@ The agent then has these tools:
 | `update_event` | Changes an event, and adds or removes guests. For an event with other guests, it needs **Allow sending calendar invitations**. |
 | `delete_event` | Deletes an event that the mailbox organizes. For an event with other guests, it needs **Allow sending calendar invitations**. It refuses an invitation from another person. |
 | `respond_to_event` | Accepts, declines or tentatively accepts an invitation. It needs **Allow RSVPs**. |
+
+The four bulk tools, `modify_threads_labels`, `modify_labels_by_query`, `trash_threads` and `trash_threads_by_query`, work in two steps. The first call changes nothing. It gives a preview, with the sender, subject and date of each thread, and a confirmation token. The agent checks the preview against your instruction. Then it calls the tool again with the same arguments and the token. That call changes exactly the threads of the preview, also when the search matches other threads by then. A token works once, and only for 10 minutes. The agent does the check, not you. Thus the preview catches a search that matches too much, but it is not a defence against prompt injection.
 
 For each mailbox, the Mailboxes page shows when an agent last used it. The page also shows the number of tool calls in the last 7 days, and how many of them made changes, for example to label, draft or send email. A call of a tool that has `account` counts. Other tools, such as `list_accounts`, do not use one mailbox, so they do not count.
 

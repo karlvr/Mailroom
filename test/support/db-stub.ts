@@ -24,3 +24,20 @@ export const findAccount = async (_env: unknown, _user: string, ref: string): Pr
 export const getGoogleConfig = async (): Promise<GoogleConfig> => ({ clientId: "client", clientSecret: "secret" }) as GoogleConfig;
 export const getRefreshToken = async (): Promise<string> => "refresh-token";
 export const setAccountStatus = async (): Promise<void> => {};
+
+// The previews of the bulk tools, in memory, by token hash.
+export const confirmations = new Map<string, { accountId: string; action: string; threadIds: string[]; expiresAt: number }>();
+
+export const saveBulkConfirmation = async (
+  _env: unknown,
+  c: { tokenHash: string; accountId: string; action: string; threadIds: string[]; expiresAt: number },
+): Promise<void> => {
+  confirmations.set(c.tokenHash, { accountId: c.accountId, action: c.action, threadIds: c.threadIds, expiresAt: c.expiresAt });
+};
+
+export const takeBulkConfirmation = async (_env: unknown, tokenHash: string, accountId: string, action: string): Promise<string[] | null> => {
+  const c = confirmations.get(tokenHash);
+  if (!c || c.accountId !== accountId || c.action !== action || c.expiresAt <= Date.now()) return null;
+  confirmations.delete(tokenHash);
+  return c.threadIds;
+};
