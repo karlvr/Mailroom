@@ -30,7 +30,7 @@ import {
   recordAccountCall,
   recordToolList,
 } from "./db";
-import { AccountNeedsRelink, GoogleApiError, calendar, gmail, gmailBatch, gmailUpload, hasCalendar } from "./google";
+import { AccountNeedsRelink, type BatchCall, GoogleApiError, calendar, gmail, gmailBatch, gmailUpload, hasCalendar } from "./google";
 import {
   attachmentParts,
   buildMessage,
@@ -101,15 +101,15 @@ const MAX_RELEASE_DAYS = 10;
 // Worker memory while it builds the draft, so the limit is lower than the Gmail limit.
 const MAX_FORWARD_ATTACHMENT_MB = 10;
 
-// The largest number of threads that one call of a bulk label tool changes. With batches of
+// The largest number of threads that one call of a bulk tool changes. With batches of
 // BATCH_SIZE, a call stays well within the 50 subrequests that the Workers Free plan allows.
 const MAX_BULK_THREADS = 500;
 
-// The number of label changes in one Gmail batch request. Each change uses 10 units of the Gmail
+// The number of thread changes in one Gmail batch request. Each change, a label change or a trash, uses 10 units of the Gmail
 // quota, and Gmail limits each user to 250 units each second, so larger batches get rate limited.
 const BATCH_SIZE = 25;
 
-// How many times a bulk label tool tries again the changes that Gmail rate limited or that failed on the Gmail side.
+// How many times a bulk tool tries again the changes that Gmail rate limited or that failed on the Gmail side.
 const BATCH_RETRIES = 2;
 
 interface GmailMessage {
@@ -661,14 +661,14 @@ export function buildServer(
   };
 
   /**
-   * Changes the labels of many threads with Gmail batch requests. Tries each call that Gmail limits
-   * or that fails on the Gmail side again, after a pause. Returns the threads that it changed and the
-   * threads that failed, with the error of each.
+   * Makes one Gmail call for each of many threads, with Gmail batch requests. `call` gives the call
+   * for a thread. Tries each call that Gmail limits or that fails on the Gmail side again, after a
+   * pause. Returns the number of threads that changed, and the threads that failed with the error of each.
    */
-  const modifyThreads = async (
+  const eachThread = async (
     a: Account,
     threadIds: string[],
-    body: { addLabelIds: string[]; removeLabelIds: string[] },
+    call: (id: string) => BatchCall,
   ): Promise<{ changed: number; failed: { thread_id: string; error: string }[] }> => {
     let pending = [...new Set(threadIds)];
     let changed = 0;
@@ -678,11 +678,7 @@ export function buildServer(
       const retry: string[] = [];
       for (let i = 0; i < pending.length; i += BATCH_SIZE) {
         const ids = pending.slice(i, i + BATCH_SIZE);
-        const results = await gmailBatch(
-          env,
-          a,
-          ids.map((id) => ({ method: "POST", path: `/threads/${encodeURIComponent(id)}/modify`, body })),
-        );
+        const results = await gmailBatch(env, a, ids.map(call));
         results.forEach((r, j) => {
           const id = ids[j]!;
           if (!r.error) {
@@ -697,6 +693,56 @@ export function buildServer(
       pending = retry;
     }
     return { changed, failed: [...failed].map(([thread_id, error]) => ({ thread_id, error })) };
+  };
+
+  /** Returns the call that changes the labels of one thread, for eachThread. */
+  const modifyCall =
+    (body: { addLabelIds: string[]; removeLabelIds: string[] }) =>
+    (id: string): BatchCall => ({ method: "POST", path: `/threads/${encodeURIComponent(id)}/modify`, body });
+
+  /** Returns the call that moves one thread to the trash, for eachThread. */
+  const trashCall = (id: string): BatchCall => ({ method: "POST", path: `/threads/${encodeURIComponent(id)}/trash` });
+
+  /**
+   * Returns the IDs of the threads that match a Gmail search, at most `max`. `more` is true when more
+   * threads match. Like Gmail search, the search leaves out spam and trash.
+   */
+  const findThreads = async (a: Account, query: string, max: number): Promise<{ ids: string[]; more: boolean }> => {
+    const ids: string[] = [];
+    let pageToken: string | undefined;
+    let more = false;
+    do {
+      const list = await gmail<{ threads?: { id: string }[]; nextPageToken?: string }>(env, a, "/threads", {
+        query: { q: query, maxResults: String(Math.min(500, max - ids.length + 1)), pageToken },
+      });
+      for (const t of list.threads ?? []) {
+        if (ids.length < max) ids.push(t.id);
+        else more = true;
+      }
+      pageToken = list.nextPageToken;
+    } while (pageToken && !more && ids.length < max);
+    return { ids, more: more || !!pageToken };
+  };
+
+  /** The input of a tool that works on each thread that matches a Gmail search, other than the account. */
+  const queryInput = {
+    query: z.string().trim().min(1).describe("A Gmail search query. Make it specific. A broad search matches many threads."),
+    max_threads: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_BULK_THREADS)
+      .default(MAX_BULK_THREADS)
+      .describe("The largest number of threads to change"),
+    dry_run: z
+      .boolean()
+      .default(false)
+      .describe("When true, the tool changes nothing. It gives the number of matching threads and their IDs."),
+  };
+
+  /** The input of a tool that works on a list of threads, other than the account. */
+  const threadIdsInput = {
+    thread_ids: z.array(z.string().min(1)).min(1).max(MAX_BULK_THREADS).describe("The IDs of the threads to change"),
   };
 
   accountTool(
@@ -729,7 +775,7 @@ export function buildServer(
         `${labelRules} ${WRITE_RULE}`,
       inputSchema: {
         account: z.string(),
-        thread_ids: z.array(z.string().min(1)).min(1).max(MAX_BULK_THREADS).describe("The IDs of the threads to change"),
+        ...threadIdsInput,
         ...labelChangeInput,
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -737,7 +783,7 @@ export function buildServer(
     async (a, args: { account: string; thread_ids: string[]; add: string[]; remove: string[] }) => {
       const change = await labelChange(a, args.add, args.remove);
       if ("content" in change) return change;
-      const { changed, failed } = await modifyThreads(a, args.thread_ids, change.body);
+      const { changed, failed } = await eachThread(a, args.thread_ids, modifyCall(change.body));
       return text({
         account: a.email,
         threads: new Set(args.thread_ids).size,
@@ -767,23 +813,8 @@ export function buildServer(
         `${labelRules} ${WRITE_RULE}`,
       inputSchema: {
         account: z.string(),
-        query: z
-          .string()
-          .trim()
-          .min(1)
-          .describe("A Gmail search query. Make it specific. A broad search changes many threads."),
         ...labelChangeInput,
-        max_threads: z
-          .number()
-          .int()
-          .min(1)
-          .max(MAX_BULK_THREADS)
-          .default(MAX_BULK_THREADS)
-          .describe("The largest number of threads to change"),
-        dry_run: z
-          .boolean()
-          .default(false)
-          .describe("When true, the tool changes nothing. It gives the number of matching threads and their IDs."),
+        ...queryInput,
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
@@ -795,20 +826,7 @@ export function buildServer(
       const problem = labelProblem(args.add, args.remove);
       if (problem) return problem;
 
-      const ids: string[] = [];
-      let pageToken: string | undefined;
-      let more = false;
-      do {
-        const list = await gmail<{ threads?: { id: string }[]; nextPageToken?: string }>(env, a, "/threads", {
-          query: { q: args.query, maxResults: String(Math.min(500, args.max_threads - ids.length + 1)), pageToken },
-        });
-        for (const t of list.threads ?? []) {
-          if (ids.length < args.max_threads) ids.push(t.id);
-          else more = true;
-        }
-        pageToken = list.nextPageToken;
-      } while (pageToken && !more && ids.length < args.max_threads);
-      more ||= !!pageToken;
+      const { ids, more } = await findThreads(a, args.query, args.max_threads);
 
       const base = { account: a.email, query: args.query, matched: ids.length, more_matches: more, added: args.add, removed: args.remove };
       if (args.dry_run) return unchanged(text({ ...base, dry_run: true, thread_ids: ids }));
@@ -816,7 +834,7 @@ export function buildServer(
 
       const change = await labelChange(a, args.add, args.remove);
       if ("content" in change) return change;
-      const { changed, failed } = await modifyThreads(a, ids, change.body);
+      const { changed, failed } = await eachThread(a, ids, modifyCall(change.body));
       return text({
         ...base,
         changed,
@@ -1039,6 +1057,7 @@ export function buildServer(
       title: "Trash thread",
       description:
         "Move a whole thread to the trash. Gmail keeps trashed threads for 30 days, and the user can restore them during that time. " +
+        "To trash many threads in one call, use trash_threads with a list of thread IDs, or trash_threads_by_query with a Gmail search. " +
         WRITE_RULE,
       inputSchema: { account: z.string(), thread_id: z.string() },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
@@ -1046,6 +1065,55 @@ export function buildServer(
     async (a, args: { account: string; thread_id: string }) => {
       await gmail(env, a, `/threads/${encodeURIComponent(args.thread_id)}/trash`, { method: "POST" });
       return text({ account: a.email, thread_id: args.thread_id, note: "Gmail moved the thread to the trash." });
+    },
+  );
+
+  /** The part of a description of a tool that trashes threads, about the trash. */
+  const trashRules =
+    "Gmail keeps trashed threads for 30 days, and the user can restore them during that time. " +
+    "Trash a thread only when the user instructed you to trash it, or to trash email like it.";
+
+  accountTool(
+    "trash_threads",
+    {
+      title: "Trash threads",
+      description:
+        `Move many whole threads to the trash, in one call. Give up to ${MAX_BULK_THREADS} thread IDs, for example from search_threads. ` +
+        "The result has the number of threads that Gmail moved to the trash, and each thread that failed with its error. " +
+        `${trashRules} ${WRITE_RULE}`,
+      inputSchema: { account: z.string(), ...threadIdsInput },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    async (a, args: { account: string; thread_ids: string[] }) => {
+      const { changed, failed } = await eachThread(a, args.thread_ids, trashCall);
+      return text({ account: a.email, threads: new Set(args.thread_ids).size, trashed: changed, failed });
+    },
+  );
+
+  accountTool(
+    "trash_threads_by_query",
+    {
+      title: "Trash threads by search",
+      description:
+        "Move every thread that matches a Gmail search to the trash, in one call. " +
+        "The search has the same syntax as search_threads. It also matches a thread by only one of its messages, " +
+        "and then the tool trashes the whole thread. Like Gmail search, the search leaves out spam and trash. " +
+        `The tool trashes at most max_threads threads, up to ${MAX_BULK_THREADS}. When more threads match, more_matches is true. ` +
+        "Then call the tool again with the same search: the threads in the trash no longer match. " +
+        "Unless the user gave you the exact search, first call the tool with dry_run, which changes nothing and gives the matches, " +
+        "and check that the search matches only the threads that the user wants to trash. " +
+        "The result has the number of matching threads, the number that Gmail moved to the trash, and each thread that failed with its error. " +
+        `${trashRules} ${WRITE_RULE}`,
+      inputSchema: { account: z.string(), ...queryInput },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    async (a, args: { account: string; query: string; max_threads: number; dry_run: boolean }) => {
+      const { ids, more } = await findThreads(a, args.query, args.max_threads);
+      const base = { account: a.email, query: args.query, matched: ids.length, more_matches: more };
+      if (args.dry_run) return unchanged(text({ ...base, dry_run: true, thread_ids: ids }));
+      if (!ids.length) return unchanged(text({ ...base, trashed: 0, failed: [] }));
+      const { changed, failed } = await eachThread(a, ids, trashCall);
+      return text({ ...base, trashed: changed, failed });
     },
   );
 

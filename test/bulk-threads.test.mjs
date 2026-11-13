@@ -1,4 +1,4 @@
-// Tests of the bulk label tools. The test bundles the real src/mcp.ts with esbuild, replaces the D1
+// Tests of the bulk thread tools: labels and trash. The test bundles the real src/mcp.ts with esbuild, replaces the D1
 // parts of src/db.ts with test/support/db-stub.ts, and answers the Google requests with a fake Gmail.
 import { after, before, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
@@ -75,7 +75,8 @@ class FakeGmail {
 
   matches(q) {
     const m = /^subject:"(.+)"$/.exec(q);
-    return [...this.threads].filter(([, t]) => (m ? t.subject === m[1] : true)).map(([id]) => id);
+    // Like Gmail search, the fake leaves out trashed threads.
+    return [...this.threads].filter(([, t]) => !t.trashed && (m ? t.subject === m[1] : true)).map(([id]) => id);
   }
 
   modify(id, body) {
@@ -85,6 +86,14 @@ class FakeGmail {
     for (const l of body.addLabelIds ?? []) t.labels.add(l);
     for (const l of body.removeLabelIds ?? []) t.labels.delete(l);
     return [200, { id, messages: [] }];
+  }
+
+  trash(id) {
+    const t = this.threads.get(id);
+    if (!t) return [404, { error: { code: 404, message: "Requested entity was not found." } }];
+    if (this.rateLimitOnce.delete(id)) return [429, { error: { code: 429, message: "User-rate limit exceeded." } }];
+    t.trashed = true;
+    return [200, { id }];
   }
 
   async fetch(input, init = {}) {
@@ -144,9 +153,10 @@ class FakeGmail {
       if (rejectToken) {
         [status, body] = [401, { error: { code: 401, message: "Request had invalid authentication credentials." } }];
       } else {
-        const m = /^\/gmail\/v1\/users\/me\/threads\/([^/]+)\/modify$/.exec(c.path);
+        const m = /^\/gmail\/v1\/users\/me\/threads\/([^/]+)\/(modify|trash)$/.exec(c.path);
         assert.ok(m && c.method === "POST", `unexpected batch call ${c.method} ${c.path}`);
-        [status, body] = this.modify(decodeURIComponent(m[1]), c.body);
+        const id = decodeURIComponent(m[1]);
+        [status, body] = m[2] === "trash" ? this.trash(id) : this.modify(id, c.body);
       }
       return [
         `--${out}`,
@@ -299,6 +309,55 @@ describe("modify_threads_labels", () => {
   test("reports a label to remove that does not exist", async () => {
     const r = await call("modify_threads_labels", { thread_ids: ["t1"], remove: ["Missing"] });
     assert.deepEqual(r.labels_not_found, ["Missing"]);
+  });
+});
+
+describe("trash_threads_by_query", () => {
+  test("trashes every matching thread, and a second call finds none", async () => {
+    const r = await call("trash_threads_by_query", { query: 'subject:"PopularityService failure"' });
+    assert.equal(r.matched, 30);
+    assert.equal(r.trashed, 30);
+    assert.deepEqual(r.failed, []);
+    for (const t of gmail.threads.values()) assert.equal(!!t.trashed, t.subject === "PopularityService failure");
+    assert.deepEqual(gmail.batches, [25, 5]);
+    assert.deepEqual(calls, [{ accountId: "acct-1", change: true }]);
+    const again = await call("trash_threads_by_query", { query: 'subject:"PopularityService failure"' });
+    assert.equal(again.matched, 0);
+  });
+
+  test("a dry run trashes nothing and does not count as a change", async () => {
+    const r = await call("trash_threads_by_query", { query: "in:inbox", dry_run: true, max_threads: 50 });
+    assert.equal(r.matched, 50);
+    assert.equal(r.more_matches, true);
+    assert.equal(r.thread_ids.length, 50);
+    assert.ok([...gmail.threads.values()].every((t) => !t.trashed));
+    assert.deepEqual(calls, [{ accountId: "acct-1", change: false }]);
+  });
+
+  test("continues where the previous call stopped", async () => {
+    const first = await call("trash_threads_by_query", { query: "in:inbox", max_threads: 40 });
+    assert.equal(first.trashed, 40);
+    assert.equal(first.more_matches, true);
+    const second = await call("trash_threads_by_query", { query: "in:inbox", max_threads: 40 });
+    assert.equal(second.trashed, 20);
+    assert.equal(second.more_matches, false);
+    assert.ok([...gmail.threads.values()].every((t) => t.trashed));
+  });
+
+  test("rejects an empty search", async () => {
+    assert.ok((await call("trash_threads_by_query", { query: "" })).isError);
+  });
+});
+
+describe("trash_threads", () => {
+  test("trashes each thread, tries rate-limited threads again and reports unknown threads", async () => {
+    gmail.rateLimitOnce = new Set(["t2"]);
+    const r = await call("trash_threads", { thread_ids: ["t1", "t2", "nope"] });
+    assert.equal(r.threads, 3);
+    assert.equal(r.trashed, 2);
+    assert.deepEqual(r.failed, [{ thread_id: "nope", error: "Requested entity was not found." }]);
+    assert.ok(gmail.threads.get("t1").trashed && gmail.threads.get("t2").trashed);
+    assert.ok(!gmail.threads.get("t3").trashed);
   });
 });
 
