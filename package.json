@@ -6,7 +6,7 @@
     "dev": "wrangler d1 migrations apply DB --local && wrangler dev",
     "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy",
     "typecheck": "tsc -p .",
-    "test": "node --test test/"
+    "test": "node --test \"test/**/*.test.mjs\""
   },
   "license": "MIT",
   "dependencies": {
@@ -16,6 +16,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261109.1",
+    "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
     "wrangler": "^4.158.0"
   },

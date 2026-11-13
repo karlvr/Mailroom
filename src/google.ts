@@ -308,6 +308,20 @@ export function parseBatchResponse(contentType: string, body: string): Map<numbe
  * whole batch request fails. A call that fails has a status that is not 2xx and an error.
  */
 export async function gmailBatch(env: Env, account: Account, calls: BatchCall[]): Promise<BatchResult[]> {
+  const results = await sendBatch(env, account, calls);
+  // Gmail answers a batch request with 200 even when it rejects the access token. Then each call
+  // has the status 401. Get a new token once, and send those calls again.
+  const rejected = results.flatMap((r, i) => (r.status === 401 ? [i] : []));
+  if (rejected.length) {
+    accessTokens.delete(account.id);
+    const again = await sendBatch(env, account, rejected.map((i) => calls[i]!));
+    rejected.forEach((i, j) => (results[i] = again[j]!));
+  }
+  return results;
+}
+
+/** Sends one Gmail batch request, and returns one result for each call. */
+async function sendBatch(env: Env, account: Account, calls: BatchCall[]): Promise<BatchResult[]> {
   if (!calls.length) return [];
   const boundary = `mailroom-${randomToken(12)}`;
   const res = await authorizedFetch(env, account, GMAIL_BATCH_URL, {
