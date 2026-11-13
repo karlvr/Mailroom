@@ -11,6 +11,7 @@ export const TEST_ACCOUNT: Account = {
   status: "ok",
   status_detail: null,
   allow_send: 0,
+  allow_reply_email: 0,
   allow_invite: 0,
   allow_reply: 0,
   scopes: "https://www.googleapis.com/auth/gmail.modify",
@@ -41,3 +42,5 @@ export const takeBulkConfirmation = async (_env: unknown, tokenHash: string, acc
   confirmations.delete(tokenHash);
   return c.threadIds;
 };
+
+export const contextSummaries = async () => ({ global: { context: "", summary: null }, accounts: new Map() });

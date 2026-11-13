@@ -36,6 +36,24 @@ function walk(part: GmailPart, out: { plain: string[]; html: string[]; attachmen
   else if (type === "text/html") out.html.push(decodeData(part.body.data));
 }
 
+/**
+ * Returns the bare addresses of an address header, such as To, in lower case. It reads each address in
+ * angle brackets, and each address without them. A display name in quotes, with commas or an "@" in
+ * it, does not count as an address.
+ */
+export function addressList(value: string | undefined): string[] {
+  if (!value) return [];
+  // Remove the display names in quotes, and the comments in parentheses.
+  const plain = value.replace(/"(?:[^"\\]|\\.)*"/g, "").replace(/\([^()]*\)/g, "");
+  const out: string[] = [];
+  for (const part of plain.split(/[,;]/)) {
+    const angle = /<([^<>]*)>/.exec(part);
+    const addr = (angle ? angle[1]! : part).trim().toLowerCase();
+    if (addr.includes("@")) out.push(addr);
+  }
+  return out;
+}
+
 export function htmlToText(html: string): string {
   return html
     .replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, "")

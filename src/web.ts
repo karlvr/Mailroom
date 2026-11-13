@@ -419,6 +419,7 @@ async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: st
     context: String(f.get("context") ?? "").trim(),
     permissions: {
       sendEmail: selected("sendEmail"),
+      replyEmail: selected("replyEmail"),
       sendInvitations: selected("sendInvitations"),
       rsvp: selected("rsvp"),
     },
