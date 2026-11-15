@@ -120,7 +120,7 @@ The agent then has these tools:
 | `search_all_accounts` | Searches every mailbox with the same Gmail search, and gives the newest threads of all the mailboxes in one list |
 | `summarise_all_accounts` | Gives the summary of `summarise_threads` for every mailbox, and the sum of the counts |
 | `get_thread` | Reads a whole thread, or one message of it, as plain text. It also gives the details of each calendar invitation in a message. |
-| `get_attachment` | Reads the text of one attachment: text and HTML files, calendar files, and PDF, Word, Excel and OpenDocument files, which Workers AI converts |
+| `get_attachment` | Reads the text of one attachment: text and HTML files, calendar files, and PDF, Word, Excel and OpenDocument files, which Workers AI converts. It gives JPEG, PNG, GIF and WebP images up to 3.75 MB as images that the agent can see. |
 | `get_state`, `set_state`, `delete_state` | Read, save and delete the notes that agents keep between runs, for one mailbox or for all of them, for example which threads already got an update. You can read and delete the notes on the Mailboxes page. |
 | `list_labels` | Lists the labels of one mailbox |
 | `modify_thread_labels` | Adds labels to a thread or removes labels from it. When it adds a label that does not exist, it creates that label. Removing `INBOX` archives the thread. The tool rejects `TRASH` and `SPAM`. |

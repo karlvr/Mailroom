@@ -1169,6 +1169,8 @@ describe("get_attachment", () => {
             { partId: "4", mimeType: "text/calendar", filename: "invite.ics", body: { data: data("BEGIN:VEVENT\nSUMMARY:Call\nEND:VEVENT"), size: 36 } },
             { partId: "5", mimeType: "image/png", filename: "logo.png", body: { attachmentId: "png", size: 10 } },
             { partId: "6", mimeType: "application/pdf", filename: "huge.pdf", body: { attachmentId: "huge", size: 11 * 1024 * 1024 } },
+            { partId: "7", mimeType: "image/jpeg", filename: "photo.jpg", body: { attachmentId: "photo", size: 4 * 1024 * 1024 } },
+            { partId: "8", mimeType: "application/zip", filename: "files.zip", body: { attachmentId: "zip", size: 100 } },
           ],
         },
       },
@@ -1193,9 +1195,24 @@ describe("get_attachment", () => {
     assert.deepEqual(conversions, []);
   });
 
-  test("refuses images, large files and unknown parts, and reports a failed conversion", async () => {
-    assert.match((await read("5")).text, /cannot read the attachment "logo.png"/);
+  test("gives an image as an image block that the agent can see", async () => {
+    const bytes = Buffer.from([0xfb, 0xff, 0xfe, 0x01]);
+    gmail.attachments.set("png", bytes.toString("base64url"));
+    const res = await client.callTool({ name: "get_attachment", arguments: { account: "me@example.com", message_id: "f1-0", part_id: "5" } });
+    assert.deepEqual(JSON.parse(res.content[0].text), {
+      account: "me@example.com",
+      message_id: "f1-0",
+      part_id: "5",
+      filename: "logo.png",
+      mime_type: "image/png",
+    });
+    assert.deepEqual(res.content[1], { type: "image", data: bytes.toString("base64"), mimeType: "image/png" });
+  });
+
+  test("refuses archives, large files and unknown parts, and reports a failed conversion", async () => {
+    assert.match((await read("8")).text, /cannot read the attachment "files.zip"/);
     assert.match((await read("6")).text, /11.0 MB/);
+    assert.match((await read("7")).text, /4.0 MB.*reads images up to 3.75 MB/);
     assert.match((await read("9")).text, /no attachment with part_id 9/);
     conversionResult = { format: "error", error: "Unsupported file" };
     assert.match((await read("1")).text, /could not convert the document: Unsupported file/);

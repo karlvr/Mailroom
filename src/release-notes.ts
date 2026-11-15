@@ -15,6 +15,10 @@ export interface ReleaseDay {
 // Add a change in the same commit as the change. Put all the changes of one day under one date.
 export const RELEASE_NOTES: ReleaseDay[] = [
   {
+    date: "2026-11-16",
+    changes: ["An agent can see image attachments, such as photos and screenshots."],
+  },
+  {
     date: "2026-11-12",
     changes: [
       "An agent can find out when its app has an old list of Mailroom tools, and then asks you to reconnect.",

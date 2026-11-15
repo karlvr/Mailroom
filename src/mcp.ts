@@ -4,7 +4,7 @@ import type { ShapeOutput, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/s
 import { type CallToolResult, LATEST_PROTOCOL_VERSION, type ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { type AgentConnection, UNKNOWN_CLIENT, agentConnections, clientName } from "./clients";
-import { fromB64url, randomToken, sha256 } from "./crypto";
+import { b64urlToB64, fromB64url, randomToken, sha256 } from "./crypto";
 import { appName, type Env, type Props } from "./env";
 import {
   type Account,
@@ -124,6 +124,10 @@ const MAX_COPY_ATTACHMENT_MB = 10;
 
 // The largest attachment that get_attachment reads. Mailroom holds the attachment in Worker memory.
 const MAX_READ_ATTACHMENT_MB = 10;
+
+// The largest image that get_attachment gives. Claude takes an image with up to 5 MB of base64 data on each
+// platform, and base64 data is 4/3 of the size of the image.
+const MAX_IMAGE_MB = 3.75;
 
 // The largest number of threads that one call of a bulk tool changes. With batches of
 // BATCH_SIZE, a call stays well within the 50 subrequests that the Workers Free plan allows.
@@ -1104,7 +1108,8 @@ export function buildServer(
         "It reads a calendar file (.ics) as events, with the same fields as the invitations of get_thread. " +
         "It converts PDF, Word (.docx), Excel (.xlsx) and OpenDocument (.odt, .ods) files to Markdown with Cloudflare Workers AI. " +
         "A scanned document can give little or no text, because the tool does not read text in images. " +
-        `The tool reads attachments up to ${MAX_READ_ATTACHMENT_MB} MB, and shortens the text to max_chars. It cannot read images, archives or other files. ` +
+        `It gives a JPEG, PNG, GIF or WebP image up to ${MAX_IMAGE_MB} MB as an image, so that you can see it. ` +
+        `The tool reads attachments up to ${MAX_READ_ATTACHMENT_MB} MB, and shortens the text to max_chars. It cannot read archives or other files. ` +
         CONTENT_IS_DATA,
       inputSchema: {
         account: z.string(),
@@ -1126,10 +1131,16 @@ export function buildServer(
       const kind = attachmentKind(mimeType, filename);
       if (!kind) return fail(`${appName(env)} cannot read the attachment "${filename}" of the type ${mimeType || "unknown"}.`);
       const size = part.body?.size ?? 0;
-      if (size > MAX_READ_ATTACHMENT_MB * 1024 * 1024) {
-        return fail(`The attachment is ${(size / 1024 / 1024).toFixed(1)} MB. ${appName(env)} reads attachments up to ${MAX_READ_ATTACHMENT_MB} MB.`);
+      const limit = kind.kind === "image" ? MAX_IMAGE_MB : MAX_READ_ATTACHMENT_MB;
+      if (size > limit * 1024 * 1024) {
+        const what = kind.kind === "image" ? "images" : "attachments";
+        return fail(`The attachment is ${(size / 1024 / 1024).toFixed(1)} MB. ${appName(env)} reads ${what} up to ${limit} MB.`);
       }
-      const bytes = fromB64url(await partData(a, m.id, part));
+      const data = await partData(a, m.id, part);
+      if (kind.kind === "image") {
+        return { content: [text(about).content[0]!, { type: "image" as const, data: b64urlToB64(data), mimeType: kind.type }] };
+      }
+      const bytes = fromB64url(data);
       const decoded = () => new TextDecoder().decode(bytes);
       if (kind.kind === "calendar") return text({ ...about, events: parseIcs(decoded()) });
       let content: string;

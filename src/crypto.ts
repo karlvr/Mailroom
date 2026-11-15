@@ -19,6 +19,11 @@ export function fromB64url(s: string): Uint8Array {
   return out;
 }
 
+/** Returns base64url data as standard base64 with padding, without decoding it. */
+export function b64urlToB64(s: string): string {
+  return s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4);
+}
+
 export function randomToken(bytes = 32): string {
   return b64url(crypto.getRandomValues(new Uint8Array(bytes)));
 }

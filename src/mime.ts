@@ -228,7 +228,10 @@ export function buildMessage(m: NewMessage): string {
 /** Returns the message in the base64url form that the `raw` field of the Gmail API takes. */
 export const buildRawMessage = (m: NewMessage) => b64url(new TextEncoder().encode(buildMessage(m)));
 
-/** How Mailroom reads an attachment: as text, as HTML, as iCalendar data, or as a document that Workers AI converts. */
+/**
+ * How Mailroom reads an attachment: as text, as HTML, as iCalendar data, as a document that Workers AI
+ * converts, or as an image that an agent can see.
+ */
 export type AttachmentKind =
   | { kind: "text" | "html" | "calendar" }
   | {
@@ -236,6 +239,11 @@ export type AttachmentKind =
       /** The file name for the conversion. It ends with the extension of the document type. */
       name: string;
       /** The media type of the document. */
+      type: string;
+    }
+  | {
+      kind: "image";
+      /** The media type of the image. */
       type: string;
     };
 
@@ -246,6 +254,15 @@ const DOCUMENT_TYPES: Record<string, string> = {
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   odt: "application/vnd.oasis.opendocument.text",
   ods: "application/vnd.oasis.opendocument.spreadsheet",
+};
+
+// The image types that an agent can see, by file extension.
+const IMAGE_TYPES: Record<string, string> = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  gif: "image/gif",
+  webp: "image/webp",
 };
 
 // The extensions of text files. A sender can give such a file a general media type, such as application/octet-stream.
@@ -265,6 +282,8 @@ export function attachmentKind(mimeType: string, filename: string): AttachmentKi
     const base = filename.trim() || "attachment";
     return { kind: "document", name: base.toLowerCase().endsWith(`.${doc}`) ? base : `${base}.${doc}`, type: DOCUMENT_TYPES[doc]! };
   }
+  const image = IMAGE_TYPES[ext] ?? (type.startsWith("image/") ? IMAGE_TYPES[type.slice("image/".length)] : undefined);
+  if (image) return { kind: "image", type: image };
   if (TEXT_EXTENSIONS.has(ext) || type.startsWith("text/") || type === "application/json" || type === "application/xml") return { kind: "text" };
   return null;
 }
