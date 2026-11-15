@@ -18,10 +18,10 @@ before(async () => {
   await build({
     stdin: {
       contents: `
-        export { buildServer, toolCatalog } from ${JSON.stringify(join(root, "src/mcp.ts"))};
+        export { buildServer, downloadAttachment, toolCatalog } from ${JSON.stringify(join(root, "src/mcp.ts"))};
         export { parseBatchResponse, batchRequestBody } from ${JSON.stringify(join(root, "src/google.ts"))};
-        export { TEST_ACCOUNT, OTHER_ACCOUNTS, resetState } from ${JSON.stringify(join(root, "test/support/db-stub.ts"))};
-        export { addressList } from ${JSON.stringify(join(root, "src/mime.ts"))};
+        export { TEST_ACCOUNT, OTHER_ACCOUNTS, attachmentLinks, resetState } from ${JSON.stringify(join(root, "test/support/db-stub.ts"))};
+        export { addressList, attachmentDisposition } from ${JSON.stringify(join(root, "src/mime.ts"))};
         export { parseIcs } from ${JSON.stringify(join(root, "src/ics.ts"))};
         export { Client } from "@modelcontextprotocol/sdk/client/index.js";
         export { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -1213,9 +1213,72 @@ describe("get_attachment", () => {
     assert.match((await read("8")).text, /cannot read the attachment "files.zip"/);
     assert.match((await read("6")).text, /11.0 MB/);
     assert.match((await read("7")).text, /4.0 MB.*reads images up to 3.75 MB/);
-    assert.match((await read("9")).text, /no attachment with part_id 9/);
+    assert.match((await read("9")).text, /does not have an attachment with part_id 9/);
     conversionResult = { format: "error", error: "Unsupported file" };
     assert.match((await read("1")).text, /could not convert the document: Unsupported file/);
+  });
+
+  describe("get_attachment_link", () => {
+    const env = { APP_NAME: "Mailroom" };
+    beforeEach(() => {
+      mod.TEST_ACCOUNT.allow_download = 1;
+      mod.attachmentLinks.clear();
+    });
+    afterEach(() => {
+      mod.TEST_ACCOUNT.allow_download = 0;
+    });
+
+    /** Makes a link to an attachment of the message, and returns the result and the token of the link. */
+    const link = async (part_id) => {
+      const r = await call("get_attachment_link", { message_id: "f1-0", part_id });
+      return { r, token: r.download_url?.split("/download/")[1] };
+    };
+
+    test("works only with Allow download links", async () => {
+      mod.TEST_ACCOUNT.allow_download = 0;
+      assert.match((await link("1")).r.text, /did not select "Allow download links"/);
+      assert.equal(mod.attachmentLinks.size, 0);
+    });
+
+    test("makes a link that downloads the file as the sender attached it, more than once", async () => {
+      const { r, token } = await link("1");
+      assert.equal(r.filename, "INV-42.PDF");
+      assert.equal(r.mime_type, "application/octet-stream");
+      assert.equal(r.size, 14);
+      assert.ok(r.download_url.startsWith("https://mailroom.test/download/"));
+      assert.ok(Date.parse(r.expires_at) > Date.now() + 9 * 60_000);
+      for (let i = 0; i < 2; i++) {
+        const res = await mod.downloadAttachment(env, token);
+        assert.equal(res.status, 200);
+        assert.equal(await res.text(), "%PDF-1.7 bytes");
+        assert.equal(res.headers.get("Content-Type"), "application/octet-stream");
+        assert.equal(res.headers.get("Content-Disposition"), `attachment; filename="INV-42.PDF"; filename*=UTF-8''INV-42.PDF`);
+        assert.equal(res.headers.get("Content-Security-Policy"), "sandbox; default-src 'none'");
+        assert.equal(res.headers.get("Cache-Control"), "no-store");
+      }
+      assert.deepEqual(conversions, []);
+    });
+
+    test("stops working when the owner turns off the setting, or when the link expires", async () => {
+      const { token } = await link("3");
+      mod.TEST_ACCOUNT.allow_download = 0;
+      const off = await mod.downloadAttachment(env, token);
+      assert.equal(off.status, 403);
+      assert.match(await off.text(), /turned off "Allow download links" for me@example.com/);
+      mod.TEST_ACCOUNT.allow_download = 1;
+      for (const l of mod.attachmentLinks.values()) l.expiresAt = Date.now() - 1;
+      assert.equal((await mod.downloadAttachment(env, token)).status, 404);
+      assert.equal((await mod.downloadAttachment(env, "nope")).status, 404);
+    });
+
+    test("refuses an unknown part", async () => {
+      assert.match((await link("9")).r.text, /does not have an attachment with part_id 9/);
+    });
+
+    test("gives the file name in ASCII and in UTF-8", () => {
+      assert.equal(mod.attachmentDisposition('Rechnung "März".pdf'), `attachment; filename="Rechnung _M_rz_.pdf"; filename*=UTF-8''Rechnung%20%22M%C3%A4rz%22.pdf`);
+      assert.equal(mod.attachmentDisposition(" "), `attachment; filename="attachment"; filename*=UTF-8''attachment`);
+    });
   });
 });
 

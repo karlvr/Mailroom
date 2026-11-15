@@ -16,7 +16,10 @@ export interface ReleaseDay {
 export const RELEASE_NOTES: ReleaseDay[] = [
   {
     date: "2026-11-16",
-    changes: ["An agent can see image attachments, such as photos and screenshots."],
+    changes: [
+      "A new setting for each mailbox, Allow download links, lets an agent download an attachment as a file, with a link that works for 10 minutes.",
+      "An agent can see image attachments, such as photos and screenshots.",
+    ],
   },
   {
     date: "2026-11-12",

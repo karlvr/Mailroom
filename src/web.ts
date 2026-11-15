@@ -33,7 +33,7 @@ import {
   updateAccountDetails,
   upsertUser,
 } from "./db";
-import { outdatedConnections } from "./mcp";
+import { downloadAttachment, outdatedConnections } from "./mcp";
 import { GMAIL_SCOPE, authorizeUrl, exchangeCode, hasCalendar, pkcePair, revokeToken } from "./google";
 import {
   APP_ICONS,
@@ -149,6 +149,9 @@ export async function handleWeb(req: Request, env: Env, ctx: ExecutionContext): 
 
   try {
     if (path === "/healthz") return new Response("ok");
+    // A download link works without a session: the token in the path is the access.
+    const download = path.match(/^\/download\/([\w-]+)$/);
+    if (download && method === "GET") return downloadAttachment(env, download[1]!);
     if (path === "/" && method === "GET") return home(req, env, origin, app);
     if (path === "/privacy" && method === "GET") return privacyPage(app, origin);
     if (path === "/terms" && method === "GET") return termsPage(app, origin);
@@ -431,6 +434,7 @@ async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: st
       replyEmail: selected("replyEmail"),
       sendInvitations: selected("sendInvitations"),
       rsvp: selected("rsvp"),
+      download: selected("download"),
     },
   }, session.email);
   return redirect(withMessages("/", "saved"));

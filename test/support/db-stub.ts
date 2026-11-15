@@ -17,6 +17,7 @@ export const TEST_ACCOUNT: Account = {
   allow_reply_email: 0,
   allow_invite: 0,
   allow_reply: 0,
+  allow_download: 0,
   scopes: "https://www.googleapis.com/auth/gmail.modify",
   created_at: 0,
   updated_at: 0,
@@ -51,6 +52,20 @@ export const takeBulkConfirmation = async (_env: unknown, check: real.BulkConfir
   if (check.threadCount !== undefined && c.threads.length !== check.threadCount) return null;
   confirmations.delete(check.tokenHash);
   return c.threads;
+};
+
+// The download links, in memory, by token hash.
+export const attachmentLinks = new Map<string, real.AttachmentLink>();
+
+export const saveAttachmentLink = async (_env: unknown, link: real.AttachmentLink): Promise<void> => {
+  attachmentLinks.set(link.tokenHash, link);
+};
+
+export const findAttachmentLink: typeof real.findAttachmentLink = async (_env, tokenHash) => {
+  const link = attachmentLinks.get(tokenHash);
+  const account = [TEST_ACCOUNT, ...OTHER_ACCOUNTS].find((a) => a.id === link?.accountId);
+  if (!link || !account || link.expiresAt <= Date.now()) return null;
+  return { account, messageId: link.messageId, partId: link.partId };
 };
 
 export const contextSummaries = async () => ({ global: { context: "", summary: null }, accounts: new Map() });

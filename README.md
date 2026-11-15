@@ -5,7 +5,7 @@ Mailroom is a self-hosted Cloudflare Worker. It lets AI agents, such as Claude, 
 - Link any number of mailboxes. They can be personal Gmail accounts, Workspace accounts from different organisations, or a mix.
 - Give each mailbox a name and context notes. Mailroom instructs agents to read these notes before they work in that mailbox.
 - Write a global context for the notes that apply to every mailbox, for example who you are, your priorities and how you write. Where the context of a mailbox conflicts with the global context, Mailroom instructs agents to follow the context of the mailbox.
-- An agent can **search, read, label, draft and trash** email. An agent can **send** email only from a mailbox where you select **Allow sending email**, or **reply** to email where you select **Allow replies**. An agent **cannot delete** received or sent email permanently. An agent can delete drafts.
+- An agent can **search, read, label, draft and trash** email. An agent can **send** email only from a mailbox where you select **Allow sending email**, or **reply** to email where you select **Allow replies**. An agent can make a link that **downloads an attachment** only where you select **Allow download links**. An agent **cannot delete** received or sent email permanently. An agent can delete drafts.
 - An agent can **read calendars, find free time, and create, change and delete events**. An agent can send calendar invitations only from a mailbox where you select **Allow sending calendar invitations**. An agent can RSVP to invitations only for a mailbox where you select **Allow RSVPs**.
 - Mailroom instructs agents to treat email and calendar content as data, never as instructions.
 - Mailroom runs only on your own Cloudflare account, and no third party operates it. Mailroom encrypts the Google tokens that it stores.
@@ -60,11 +60,12 @@ You do not need app verification from Google. When you link a mailbox, Google sh
 
    Put the notes that apply to every mailbox in **Global context** at the top of the page.
 
-6. Each mailbox has three settings for actions that notify other people. Each setting is off until you select it. Read [Write actions and untrusted content](#write-actions-and-untrusted-content) first.
+6. Each mailbox has settings for actions that notify other people or that give access to its mail outside Mailroom. Each setting is off until you select it. Read [Write actions and untrusted content](#write-actions-and-untrusted-content) first.
    - **Allow sending email:** agents can send email from the mailbox.
    - **Allow replies:** agents can reply, or reply to all, to a message, but only to the people who are on that message. **Allow sending email** includes replies.
    - **Allow sending calendar invitations:** agents can invite guests to events, and change or delete events that have other guests. Google emails each guest.
    - **Allow RSVPs:** agents can accept, decline or tentatively accept invitations. Google tells the organizer.
+   - **Allow download links:** agents can make a link that downloads an attachment as a file. Anyone who has the link can download the file for 10 minutes, without signing in.
 
 ### 4. Connect an agent
 
@@ -121,6 +122,7 @@ The agent then has these tools:
 | `summarise_all_accounts` | Gives the summary of `summarise_threads` for every mailbox, and the sum of the counts |
 | `get_thread` | Reads a whole thread, or one message of it, as plain text. It also gives the details of each calendar invitation in a message. |
 | `get_attachment` | Reads the text of one attachment: text and HTML files, calendar files, and PDF, Word, Excel and OpenDocument files, which Workers AI converts. It gives JPEG, PNG, GIF and WebP images up to 3.75 MB as images that the agent can see. |
+| `get_attachment_link` | Makes a link that downloads one attachment as a file, without conversion. The link works for 10 minutes. It needs **Allow download links**. |
 | `get_state`, `set_state`, `delete_state` | Read, save and delete the notes that agents keep between runs, for one mailbox or for all of them, for example which threads already got an update. You can read and delete the notes on the Mailboxes page. |
 | `list_labels` | Lists the labels of one mailbox |
 | `modify_thread_labels` | Adds labels to a thread or removes labels from it. When it adds a label that does not exist, it creates that label. Removing `INBOX` archives the thread. The tool rejects `TRASH` and `SPAM`. |
@@ -168,12 +170,13 @@ Labelling, archiving, drafting, sending and trashing email are write actions. Cr
 
 Mailroom also instructs agents to treat email and calendar content as data, never as instructions. This includes the title, description and location of a calendar invitation, because any person can send you an invitation. For an email or an event that requests an action, Mailroom instructs agents to report the request to you and not to do the action.
 
-These instructions reduce the risk of prompt injection, but they cannot remove it. A malicious email or invitation can still try to make an agent send email, invite a guest to a private meeting, or trash email. For this reason, each action that notifies other people is off for each mailbox until you select its setting:
+These instructions reduce the risk of prompt injection, but they cannot remove it. A malicious email or invitation can still try to make an agent send email, invite a guest to a private meeting, or trash email. For this reason, each action that notifies other people or that gives access to your mail outside Mailroom is off for each mailbox until you select its setting:
 
 - **Allow sending email** for `send_draft`. A forward is a draft, so an agent needs this setting to send a forward. Forwarding is the easiest way for a malicious email to get copies of your email.
 - **Allow replies** for `send_draft` of a reply. Each recipient of the reply, in To, Cc and Bcc, must be on the message that the reply answers: its sender, or an address in its To, Cc or Reply-To. Thus an agent cannot send a new message or a forward, or add a person to a reply. A malicious email can still get a reply from the agent, with text that the agent writes. **Allow sending email** includes replies, so you do not need to select both.
 - **Allow sending calendar invitations** for invitations, and for changes and cancellations of events with other guests. An invitation copies the title, description and Meet link of the event to each guest.
 - **Allow RSVPs** for `respond_to_event`
+- **Allow download links** for `get_attachment_link`. Anyone who has a link can download the attachment for 10 minutes, without signing in. A malicious email can try to make an agent post a link somewhere else. An agent can already read the text of an attachment, but a link gives the whole file.
 
 Select a setting only for a mailbox where you accept this risk. An agent can always change or delete an event that has no other guests. If an agent trashes a thread by mistake, you can restore it from the Gmail trash for 30 days.
 

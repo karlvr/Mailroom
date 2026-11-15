@@ -131,6 +131,8 @@ export interface Account {
   allow_invite: number;
   /** 1 when the owner allows agents to reply to calendar invitations for this account, otherwise 0. */
   allow_reply: number;
+  /** 1 when the owner allows agents to make links that download the attachments of this mailbox, otherwise 0. */
+  allow_download: number;
   /** The Google permissions that the stored refresh token grants, separated by spaces. Null for an account linked before Mailroom recorded them. */
   scopes: string | null;
   created_at: number;
@@ -138,8 +140,8 @@ export interface Account {
 }
 
 /**
- * The actions of a linked account that notify other people. The owner allows each one separately,
- * and each one is off until the owner allows it.
+ * The actions of a linked account that notify other people, or that give access to its mail outside
+ * Mailroom. The owner allows each one separately, and each one is off until the owner allows it.
  */
 export interface AccountPermissions {
   /** True when agents may send email from this mailbox. */
@@ -153,6 +155,11 @@ export interface AccountPermissions {
   sendInvitations: boolean;
   /** True when agents may accept, decline or tentatively accept invitations. */
   rsvp: boolean;
+  /**
+   * True when agents may make links that download attachments. Anyone who has such a link can
+   * download the attachment, without signing in, until the link expires.
+   */
+  download: boolean;
 }
 
 /** The label of the setting that controls each permission, as the owner sees it on the web page. */
@@ -161,6 +168,7 @@ export const PERMISSION_LABELS: Record<keyof AccountPermissions, string> = {
   replyEmail: "Allow replies",
   sendInvitations: "Allow sending calendar invitations",
   rsvp: "Allow RSVPs",
+  download: "Allow download links",
 };
 
 /** Returns the permissions that the owner gave to an account. */
@@ -170,6 +178,7 @@ export function accountPermissions(a: Account): AccountPermissions {
     replyEmail: a.allow_reply_email === 1,
     sendInvitations: a.allow_invite === 1,
     rsvp: a.allow_reply === 1,
+    download: a.allow_download === 1,
   };
 }
 
@@ -196,7 +205,7 @@ export interface LinkedGoogleAccount {
 }
 
 const ACCOUNT_COLS =
-  "id, user_id, email, name, context, status, status_detail, allow_send, allow_reply_email, allow_invite, allow_reply, scopes, created_at, updated_at";
+  "id, user_id, email, name, context, status, status_detail, allow_send, allow_reply_email, allow_invite, allow_reply, allow_download, scopes, created_at, updated_at";
 
 export async function listAccounts(env: Env, userId: string): Promise<Account[]> {
   const { results } = await env.DB.prepare(
@@ -257,7 +266,7 @@ export async function updateAccountDetails(
   const p = details.permissions;
   const now = Date.now();
   const update = env.DB.prepare(
-    `UPDATE accounts SET name = ?, allow_send = ?, allow_reply_email = ?, allow_invite = ?, allow_reply = ?, updated_at = ?
+    `UPDATE accounts SET name = ?, allow_send = ?, allow_reply_email = ?, allow_invite = ?, allow_reply = ?, allow_download = ?, updated_at = ?
      WHERE id = ? AND user_id = ?`,
   ).bind(
     details.name.slice(0, 100),
@@ -265,6 +274,7 @@ export async function updateAccountDetails(
     p.replyEmail ? 1 : 0,
     p.sendInvitations ? 1 : 0,
     p.rsvp ? 1 : 0,
+    p.download ? 1 : 0,
     now,
     id,
     userId,
@@ -288,6 +298,7 @@ export async function deleteAccount(env: Env, userId: string, id: string): Promi
       env.DB.prepare("DELETE FROM context_versions WHERE account_id = ?").bind(versionKey(userId, { kind: "account", accountId: id })),
       env.DB.prepare("DELETE FROM account_usage WHERE account_id = ?").bind(id),
       env.DB.prepare("DELETE FROM bulk_confirmations WHERE account_id = ?").bind(id),
+      env.DB.prepare("DELETE FROM attachment_links WHERE account_id = ?").bind(id),
       env.DB.prepare("DELETE FROM agent_state WHERE user_id = ? AND account_id = ?").bind(userId, id),
       env.DB.prepare("DELETE FROM accounts WHERE id = ? AND user_id = ?").bind(id, userId),
     ]);
@@ -412,6 +423,53 @@ export async function takeBulkConfirmation(env: Env, check: BulkConfirmationChec
     .bind(check.tokenHash, check.accountId, check.action, Date.now(), check.listed ?? null, check.threadCount ?? null)
     .first<{ threads: string }>();
   return row ? (JSON.parse(row.threads) as PreviewThread[]) : null;
+}
+
+// ---------- attachment links ----------
+
+/** How long a link that downloads an attachment works, in minutes. */
+export const ATTACHMENT_LINK_MINUTES = 10;
+
+/** A link that downloads one attachment of a message, until it expires. */
+export interface AttachmentLink {
+  /** The SHA-256 of the token in the link, in base64url. */
+  tokenHash: string;
+  accountId: string;
+  messageId: string;
+  partId: string;
+  /** The time when the link expires, in milliseconds since the epoch. */
+  expiresAt: number;
+}
+
+/** Saves a link, and deletes the links that expired. */
+export async function saveAttachmentLink(env: Env, link: AttachmentLink): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM attachment_links WHERE expires_at <= ?").bind(Date.now()),
+    env.DB.prepare(
+      "INSERT INTO attachment_links (token_hash, account_id, message_id, part_id, expires_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind(link.tokenHash, link.accountId, link.messageId, link.partId, link.expiresAt),
+  ]);
+}
+
+/**
+ * Returns the attachment of the link with the token hash, and its account, when the link did not
+ * expire. Otherwise returns null. A link works more than once.
+ */
+export async function findAttachmentLink(
+  env: Env,
+  tokenHash: string,
+): Promise<{ account: Account; messageId: string; partId: string } | null> {
+  const cols = ACCOUNT_COLS.split(", ").map((c) => `a.${c}`).join(", ");
+  const row = await env.DB.prepare(
+    `SELECT ${cols}, l.message_id AS link_message_id, l.part_id AS link_part_id
+     FROM attachment_links l JOIN accounts a ON a.id = l.account_id
+     WHERE l.token_hash = ? AND l.expires_at > ?`,
+  )
+    .bind(tokenHash, Date.now())
+    .first<Account & { link_message_id: string; link_part_id: string }>();
+  if (!row) return null;
+  const { link_message_id: messageId, link_part_id: partId, ...account } = row;
+  return { account, messageId, partId };
 }
 
 // ---------- context history ----------

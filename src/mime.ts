@@ -288,6 +288,17 @@ export function attachmentKind(mimeType: string, filename: string): AttachmentKi
   return null;
 }
 
+/**
+ * Returns a Content-Disposition header that makes a browser save a file with the name `filename`. The
+ * header has a plain ASCII name, and the full name in UTF-8 for the clients that read it.
+ */
+export function attachmentDisposition(filename: string): string {
+  const name = filename.trim() || "attachment";
+  const ascii = name.replace(/[^\x20-\x7e]|["\\]/g, "_");
+  const utf8 = encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${utf8}`;
+}
+
 /** Returns the part of a message with the part ID, or null when the message has no such part. */
 export function findPart(payload: GmailPart, partId: string): GmailPart | null {
   if (payload.partId === partId) return payload;

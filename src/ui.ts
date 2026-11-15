@@ -7,6 +7,7 @@ import {
   type ContextSummaries,
   type ContextSummary,
   type ContextVersion,
+  ATTACHMENT_LINK_MINUTES,
   GLOBAL_CONTEXT,
   MAX_CONTEXT_CHARS,
   MAX_STATE_DAYS,
@@ -796,7 +797,8 @@ export function privacyPage(app: string, origin: string) {
 ${section(
   `Data that ${a} stores`,
   `<ul><li>Your Google account ID, your email address, your global context, and the times of your first and last sign-in.</li>
-<li>For each mailbox that you link: its address, its short name, its context notes, the settings <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, <b>${esc(PERMISSION_LABELS.replyEmail)}</b>, <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.rsvp)}</b>, the Google permissions that you granted, and a Google refresh token. ${a} encrypts the token before it stores it.</li>
+<li>For each mailbox that you link: its address, its short name, its context notes, the settings <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, <b>${esc(PERMISSION_LABELS.replyEmail)}</b>, <b>${esc(PERMISSION_LABELS.sendInvitations)}</b>, <b>${esc(PERMISSION_LABELS.rsvp)}</b> and <b>${esc(PERMISSION_LABELS.download)}</b>, the Google permissions that you granted, and a Google refresh token. ${a} encrypts the token before it stores it.</li>
+<li>For each download link that an agent makes: the message and the attachment, and when the link expires. ${a} deletes expired links. ${a} does not store the attachment.</li>
 <li>For your global context and for each mailbox: each version of the context notes that you saved or accepted, when the version became current, and who made it. For a change that an agent proposed, ${a} also stores the name of the app, and the name and the reason that the agent gave. ${a} deletes a proposal when you reject it.</li>
 <li>For each mailbox: the number of tool calls that agents made on each day, the number of those calls that made changes, and the time of the last call. When an agent uses the mailbox, ${a} deletes the counts that are older than ${USAGE_DAYS} days.</li>
 <li>For your global context and for each mailbox: the notes that agents save between runs, for example which threads already got an update, with the app and the name of the agent that saved each note. ${a} deletes a note when it expires, at most ${MAX_STATE_DAYS} days after an agent saved it. You can delete notes on the Mailboxes page.</li>
@@ -808,6 +810,7 @@ ${section(
   `<p>${a} uses Google sign-in to get your verified email address. ${a} uses the Gmail API and the Google Calendar API only when an agent calls one of the ${a} tools. ${a} then sends the result to that agent through the connection that you approved.</p>
 <p>The tools can search, read, label and trash email, and save drafts of new messages, replies and forwards. ${a} sends email only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendEmail)}</b>, or where you select <b>${esc(PERMISSION_LABELS.replyEmail)}</b> and the email is a reply to the people of the message that it answers.</p>
 <p>The tools can read calendars, find free time, and create, change and delete events. ${a} sends calendar invitations only from a mailbox where you select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b>. ${a} RSVPs to invitations only for a mailbox where you select <b>${esc(PERMISSION_LABELS.rsvp)}</b>.</p>
+<p>${a} makes links that download attachments only for a mailbox where you select <b>${esc(PERMISSION_LABELS.download)}</b>. Anyone who has such a link can download the attachment for ${ATTACHMENT_LINK_MINUTES} minutes, without signing in.</p>
 <p>${a} does not sell your data. ${a} does not use your data for advertising or to train AI models.</p>
 <p>The use and transfer of information that ${a} receives from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>`,
 )}
@@ -850,7 +853,7 @@ ${section(
 )}
 ${section(
   "Your instructions",
-  `<p>An agent uses ${a} when you instruct it. You are responsible for your instructions and for the actions that an agent does because of them. Select <b>${esc(PERMISSION_LABELS.sendEmail)}</b> only for a mailbox where you accept that an agent can send email, and <b>${esc(PERMISSION_LABELS.replyEmail)}</b> only for a mailbox where you accept that an agent can reply to email. Select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.rsvp)}</b> only for a mailbox where you accept that an agent can send calendar invitations and RSVPs.</p>
+  `<p>An agent uses ${a} when you instruct it. You are responsible for your instructions and for the actions that an agent does because of them. Select <b>${esc(PERMISSION_LABELS.sendEmail)}</b> only for a mailbox where you accept that an agent can send email, and <b>${esc(PERMISSION_LABELS.replyEmail)}</b> only for a mailbox where you accept that an agent can reply to email. Select <b>${esc(PERMISSION_LABELS.sendInvitations)}</b> and <b>${esc(PERMISSION_LABELS.rsvp)}</b> only for a mailbox where you accept that an agent can send calendar invitations and RSVPs. Select <b>${esc(PERMISSION_LABELS.download)}</b> only for a mailbox where you accept that an agent can give an attachment to anyone who gets the link.</p>
 <p>${a} instructs agents to treat email and calendar content as data, never as instructions. This instruction reduces the risk that an email or an event tricks an agent, but it cannot remove the risk.</p>`,
 )}
 ${section(
@@ -929,6 +932,7 @@ export const PERMISSION_FIELDS: Record<keyof AccountPermissions, string> = {
   replyEmail: "allow_reply_email",
   sendInvitations: "allow_invite",
   rsvp: "allow_reply",
+  download: "allow_download",
 };
 
 /** Returns the path of the history page of a context. The paths of the actions on that context start with it. */
@@ -1146,18 +1150,20 @@ export function dashboardPage(
   // Each mailbox starts collapsed, unless it is the only one or it needs setup.
   const opened = (m: Account) => accounts.length === 1 || needsSetup(m) || m.id === notices.openSection;
   const can = (text: string) => `<div class="r"><span>${text}</span><span class="v">${ICON.check}Allowed</span></div>`;
-  /** The short text of the pill that shows that a permission is on. */
+  /** The icon and the short text of the pill that shows that a permission is on. */
   const permissionPills: Record<keyof AccountPermissions, string> = {
-    sendEmail: "Sending on",
-    replyEmail: "Replies on",
-    sendInvitations: "Invitations on",
-    rsvp: "RSVP on",
+    sendEmail: `${ICON.send}Sending on`,
+    replyEmail: `${ICON.send}Replies on`,
+    sendInvitations: `${ICON.send}Invitations on`,
+    rsvp: `${ICON.send}RSVP on`,
+    download: "Download links on",
   };
   const permissionHelp: Record<keyof AccountPermissions, string> = {
     sendEmail: "Agents can send email from this mailbox: new messages, forwards and replies to anyone.",
     replyEmail: `Agents can reply, or reply to all, to a message. Each person who gets the reply must be on that message already. To send a new message or a forward, or to add people to a reply, agents need ${esc(PERMISSION_LABELS.sendEmail)}. ${esc(PERMISSION_LABELS.sendEmail)} includes replies, so you do not need to select both.`,
     sendInvitations: "Agents can invite guests to events, and change or delete events that have other guests. Google emails each guest.",
     rsvp: "Agents can accept, decline or tentatively accept invitations. Google tells the organizer.",
+    download: `Agents can make a link that downloads an attachment as a file. Anyone who has the link can download the file for ${ATTACHMENT_LINK_MINUTES} minutes, without signing in.`,
   };
   const permissionKeys = Object.keys(PERMISSION_FIELDS) as (keyof AccountPermissions)[];
   const acct = (m: Account, i: number) => {
@@ -1167,11 +1173,11 @@ export function dashboardPage(
     const calendar = hasCalendar(grantedScopes(m));
     // After a link, the cursor goes to the first empty field of the new mailbox.
     const focus = m.id === notices.linkedMailbox ? (m.name ? "context" : "name") : null;
-    const onPills = permissionKeys
+    const onKeys = permissionKeys
       // Sending includes replies, so "Replies on" shows only when sending is off.
-      .filter((k) => permissions[k] && !(k === "replyEmail" && permissions.sendEmail))
-      .map((k) => `<span class="pill send">${ICON.send}${permissionPills[k]}</span>`)
-      .join("");
+      .filter((k) => permissions[k] && !(k === "replyEmail" && permissions.sendEmail));
+    const onPills = onKeys.map((k) => `<span class="pill send">${permissionPills[k]}</span>`).join("");
+    const sendingOff = onKeys.every((k) => k === "download") ? `<span class="pill">Sending off</span>` : "";
     const toggle = (k: keyof AccountPermissions) => {
       const field = PERMISSION_FIELDS[k];
       return `<label class="toggle" for="${field}-${id}">${esc(PERMISSION_LABELS[k])}<input id="${field}-${id}" type="checkbox" name="${field}" value="1"${permissions[k] ? " checked" : ""}></label>
@@ -1182,7 +1188,7 @@ export function dashboardPage(
 <span class="who"><b>${esc(m.name || m.email)}</b>${m.name ? `<span>${esc(m.email)}</span>` : ""}<span class="usage">${usageLine(usage.get(m.id), now)}</span></span>
 <span class="pills">${needsSetup(m) ? `<span class="pill warn">Needs setup</span>` : ""}${
       m.status === "ok" ? `<span class="pill ok">Linked</span>` : `<span class="pill warn">${ICON.warn}Needs re-linking</span>`
-    }${calendar ? `<span class="pill ok">Calendar</span>` : `<span class="pill">No calendar</span>`}${onPills || `<span class="pill">Sending off</span>`}${
+    }${calendar ? `<span class="pill ok">Calendar</span>` : `<span class="pill">No calendar</span>`}${onPills}${sendingOff}${
       hasProposal(m) ? `<span class="pill warn">Context proposal</span>` : ""
     }</span>
 <span class="chev">${ICON.chevron}</span></summary>
