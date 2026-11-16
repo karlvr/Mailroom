@@ -228,9 +228,9 @@ function describeAccount(a: Account, proposalWaits: boolean) {
     context: a.context || null,
     can_send: p.sendEmail,
     can_reply: p.sendEmail || p.replyEmail,
+    can_download: p.download,
     can_invite: p.sendInvitations,
     can_rsvp: p.rsvp,
-    can_download: p.download,
     calendar: hasCalendar(grantedScopes(a)),
     context_proposal_waits: proposalWaits,
     status: a.status === "ok" ? "ok" : `needs re-linking: ${a.status_detail ?? "Google access stopped working"}`,
@@ -833,14 +833,15 @@ export function buildServer(
         "global_context_proposal_waits is true when a proposal from propose_global_context waits for the user to accept or reject it. " +
         "To read that proposal, call get_global_context. " +
         "For each account, the result has the address, the name, the context notes, " +
-        "can_send, can_reply, can_invite, can_rsvp, can_download, calendar and the status. " +
+        "can_send, can_reply, can_download, can_invite, can_rsvp, calendar and the status. " +
         "The user writes the context notes about the purpose, priorities and tone of the account. " +
         `${CONTEXT_PRECEDENCE} ` +
         "can_send is true when you may send email. " +
         "can_reply is true when you may send a reply, or a reply to all, to the people of the message that it answers. " +
-        "When can_reply is true and can_send is false, you may not send a new message or a forward, or add people to a reply. can_invite is true when you may invite guests to calendar events, " +
-        "and change or delete events that have other guests. can_rsvp is true when you may RSVP to invitations: accept, decline or tentatively accept them. " +
+        "When can_reply is true and can_send is false, you may not send a new message or a forward, or add people to a reply. " +
         "can_download is true when you may make links that download attachments, with get_attachment_link. " +
+        "can_invite is true when you may invite guests to calendar events, " +
+        "and change or delete events that have other guests. can_rsvp is true when you may RSVP to invitations: accept, decline or tentatively accept them. " +
         "calendar is true when the calendar tools work for the account. " +
         "context is the live context of the account, the only context of the account that is in effect. " +
         "context_proposal_waits is true when a proposal from propose_context waits for the user to accept or reject it. " +

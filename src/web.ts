@@ -432,9 +432,9 @@ async function accountPost(req: Request, env: Env, ctx: ExecutionContext, id: st
     permissions: {
       sendEmail: selected("sendEmail"),
       replyEmail: selected("replyEmail"),
+      download: selected("download"),
       sendInvitations: selected("sendInvitations"),
       rsvp: selected("rsvp"),
-      download: selected("download"),
     },
   }, session.email);
   return redirect(withMessages("/", "saved"));

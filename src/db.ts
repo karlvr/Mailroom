@@ -151,24 +151,24 @@ export interface AccountPermissions {
    * its To, Cc and Reply-To addresses. sendEmail allows every message, so it includes this permission.
    */
   replyEmail: boolean;
-  /** True when agents may invite guests to events, and change or delete events that have other guests. */
-  sendInvitations: boolean;
-  /** True when agents may accept, decline or tentatively accept invitations. */
-  rsvp: boolean;
   /**
    * True when agents may make links that download attachments. Anyone who has such a link can
    * download the attachment, without signing in, until the link expires.
    */
   download: boolean;
+  /** True when agents may invite guests to events, and change or delete events that have other guests. */
+  sendInvitations: boolean;
+  /** True when agents may accept, decline or tentatively accept invitations. */
+  rsvp: boolean;
 }
 
 /** The label of the setting that controls each permission, as the owner sees it on the web page. */
 export const PERMISSION_LABELS: Record<keyof AccountPermissions, string> = {
   sendEmail: "Allow sending email",
   replyEmail: "Allow replies",
+  download: "Allow download links",
   sendInvitations: "Allow sending calendar invitations",
   rsvp: "Allow RSVPs",
-  download: "Allow download links",
 };
 
 /** Returns the permissions that the owner gave to an account. */
@@ -176,9 +176,9 @@ export function accountPermissions(a: Account): AccountPermissions {
   return {
     sendEmail: a.allow_send === 1,
     replyEmail: a.allow_reply_email === 1,
+    download: a.allow_download === 1,
     sendInvitations: a.allow_invite === 1,
     rsvp: a.allow_reply === 1,
-    download: a.allow_download === 1,
   };
 }
 

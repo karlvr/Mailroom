@@ -63,9 +63,9 @@ You do not need app verification from Google. When you link a mailbox, Google sh
 6. Each mailbox has settings for actions that notify other people or that give access to its mail outside Mailroom. Each setting is off until you select it. Read [Write actions and untrusted content](#write-actions-and-untrusted-content) first.
    - **Allow sending email:** agents can send email from the mailbox.
    - **Allow replies:** agents can reply, or reply to all, to a message, but only to the people who are on that message. **Allow sending email** includes replies.
+   - **Allow download links:** agents can make a link that downloads an attachment as a file. Anyone who has the link can download the file for 10 minutes, without signing in.
    - **Allow sending calendar invitations:** agents can invite guests to events, and change or delete events that have other guests. Google emails each guest.
    - **Allow RSVPs:** agents can accept, decline or tentatively accept invitations. Google tells the organizer.
-   - **Allow download links:** agents can make a link that downloads an attachment as a file. Anyone who has the link can download the file for 10 minutes, without signing in.
 
 ### 4. Connect an agent
 
@@ -174,9 +174,9 @@ These instructions reduce the risk of prompt injection, but they cannot remove i
 
 - **Allow sending email** for `send_draft`. A forward is a draft, so an agent needs this setting to send a forward. Forwarding is the easiest way for a malicious email to get copies of your email.
 - **Allow replies** for `send_draft` of a reply. Each recipient of the reply, in To, Cc and Bcc, must be on the message that the reply answers: its sender, or an address in its To, Cc or Reply-To. Thus an agent cannot send a new message or a forward, or add a person to a reply. A malicious email can still get a reply from the agent, with text that the agent writes. **Allow sending email** includes replies, so you do not need to select both.
+- **Allow download links** for `get_attachment_link`. Anyone who has a link can download the attachment for 10 minutes, without signing in. A malicious email can try to make an agent post a link somewhere else. An agent can already read the text of an attachment, but a link gives the whole file.
 - **Allow sending calendar invitations** for invitations, and for changes and cancellations of events with other guests. An invitation copies the title, description and Meet link of the event to each guest.
 - **Allow RSVPs** for `respond_to_event`
-- **Allow download links** for `get_attachment_link`. Anyone who has a link can download the attachment for 10 minutes, without signing in. A malicious email can try to make an agent post a link somewhere else. An agent can already read the text of an attachment, but a link gives the whole file.
 
 Select a setting only for a mailbox where you accept this risk. An agent can always change or delete an event that has no other guests. If an agent trashes a thread by mistake, you can restore it from the Gmail trash for 30 days.
 
