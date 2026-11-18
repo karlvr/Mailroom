@@ -128,10 +128,10 @@ The agent then has these tools:
 | `modify_thread_labels` | Adds labels to a thread or removes labels from it. When it adds a label that does not exist, it creates that label. Removing `INBOX` archives the thread. The tool rejects `TRASH` and `SPAM`. |
 | `modify_threads_labels` | Makes the same label change to up to 500 threads. You give a list of thread IDs. It previews first: see below. |
 | `modify_labels_by_query` | Makes the same label change to each thread that matches a Gmail search, up to 500 threads. It previews first: see below. |
-| `create_draft` | Saves a new draft or a threaded reply. It does not send the draft. |
-| `create_forward_draft` | Saves a draft that forwards one message, with its attachments. It does not send the draft. |
+| `create_draft` | Saves a new draft or a threaded reply. By default, a reply goes to everyone on the message that it answers, and it quotes that message under the new text, as Gmail does. A reply can answer an earlier message of the thread. It does not send the draft. |
+| `create_forward_draft` | Saves a draft that forwards one message, with its formatting, its inline images and its attachments. It does not send the draft. |
 | `list_drafts` | Lists the drafts of one mailbox, with the recipients, subject and snippet of each |
-| `update_draft` | Changes the body, recipients or subject of a draft. It keeps the thread and the attachments, and it does not send the draft. |
+| `update_draft` | Changes the text, recipients or subject of a draft. It keeps the quote of a reply, the forwarded message of a forward, the thread and the attachments, and it does not send the draft. |
 | `delete_draft` | Deletes a draft permanently. It cannot delete received or sent email. |
 | `send_draft` | Sends a draft. It works for a mailbox where you selected **Allow sending email**. With only **Allow replies**, it sends only a reply to the people of the message that the reply answers. |
 | `trash_thread` | Moves a thread to the trash. Gmail keeps trashed threads for 30 days. |
@@ -335,8 +335,8 @@ The authors supply the Mailroom software under the [MIT License](LICENSE), "as i
 ## Limits
 
 - **Up to 100 Google users** while Google has not verified the app. Each person counts once, however many mailboxes they link. For more users, you need Google's verification and an annual security assessment (CASA).
-- **Plain-text drafts only.** A forward has the plain text of the forwarded message, not its formatting.
-- **Attachments:** a forward copies the attachments of the message, up to 10 MB in total. `get_thread` lists the names of attachments, but no tool gives the content of an attachment to an agent.
+- **Plain text from agents.** An agent writes the text of a draft as plain text. The quote of a reply and the forwarded message of a forward keep their formatting.
+- **Attachments:** a forward copies the attachments of the message, up to 10 MB in total. A reply does not copy the inline images of the message that it quotes.
 
 ## License
 

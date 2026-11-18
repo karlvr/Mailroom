@@ -15,6 +15,15 @@ export interface ReleaseDay {
 // Add a change in the same commit as the change. Put all the changes of one day under one date.
 export const RELEASE_NOTES: ReleaseDay[] = [
   {
+    date: "2026-11-18",
+    changes: [
+      "A reply that an agent drafts now quotes the email that it answers, as Gmail does, and goes to everyone on that email unless the agent replies only to the sender.",
+      "An agent can draft a reply to an earlier email in a conversation, not only to the latest one.",
+      "A forward that an agent drafts keeps the formatting and the inline images of the email.",
+      "When an agent changes the text of a draft reply or forward, the quote or the forwarded email stays in the draft.",
+    ],
+  },
+  {
     date: "2026-11-16",
     changes: [
       "A new setting for each mailbox, Allow download links, lets an agent download an attachment as a file, with a link that works for 10 minutes.",

@@ -21,7 +21,7 @@ before(async () => {
         export { buildServer, downloadAttachment, toolCatalog } from ${JSON.stringify(join(root, "src/mcp.ts"))};
         export { parseBatchResponse, batchRequestBody } from ${JSON.stringify(join(root, "src/google.ts"))};
         export { TEST_ACCOUNT, OTHER_ACCOUNTS, attachmentLinks, resetState } from ${JSON.stringify(join(root, "test/support/db-stub.ts"))};
-        export { addressList, attachmentDisposition } from ${JSON.stringify(join(root, "src/mime.ts"))};
+        export { addressList, attachmentDisposition, mailboxes } from ${JSON.stringify(join(root, "src/mime.ts"))};
         export { parseIcs } from ${JSON.stringify(join(root, "src/ics.ts"))};
         export { Client } from "@modelcontextprotocol/sdk/client/index.js";
         export { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -56,6 +56,30 @@ after(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+/** Parses an RFC 822 message or a MIME part into its header fields, and its parts or its decoded content as data and as text. */
+function parseMime(raw) {
+  const at = raw.indexOf("\r\n\r\n");
+  const fields = Object.fromEntries(raw.slice(0, at).split("\r\n").map((l) => [l.slice(0, l.indexOf(":")), l.slice(l.indexOf(":") + 2)]));
+  const body = raw.slice(at + 4);
+  const boundary = /boundary="([^"]+)"/.exec(fields["Content-Type"] ?? "")?.[1];
+  // Each part is between a CRLF after one boundary line and the CRLF before the next one.
+  if (boundary) return { fields, parts: body.split(`--${boundary}`).slice(1, -1).map((p) => parseMime(p.slice(2, -2))) };
+  const data = Buffer.from(body.replace(/\r\n/g, ""), "base64");
+  return { fields, data, text: data.toString() };
+}
+
+/** Returns a part of a message from parseMime as Gmail gives it in the payload of a message. */
+function toPayload(node) {
+  const mimeType = node.fields["Content-Type"].split(";")[0];
+  const filename = /filename="([^"]*)"/.exec(node.fields["Content-Disposition"] ?? "")?.[1] ?? "";
+  const headers = Object.entries(node.fields).map(([name, value]) => ({ name, value }));
+  if (node.parts) return { mimeType, filename, headers, parts: node.parts.map(toPayload) };
+  return { mimeType, filename, headers, body: { data: node.data.toString("base64url"), size: node.data.length } };
+}
+
+/** Returns the first part of a message from parseMime with the media type, such as text/html, or undefined. */
+const partOf = (node, type) => (node.parts ? node.parts.map((p) => partOf(p, type)).find(Boolean) : node.fields["Content-Type"]?.startsWith(type) ? node : undefined);
+
 /** The date of a message in the fake Gmail without a date of its own. */
 const DEFAULT_DATE = "Tue, 10 Nov 2026 09:00:00 +1300";
 
@@ -87,8 +111,12 @@ class FakeGmail {
     this.eventQueries = [];
     /** When true, the calendar rejects each request for events with 410, as for an updatedMin that is too old. */
     this.eventsGone = false;
-    /** The drafts that the upload API replaced: the ID, the metadata and the message of each. */
+    /** The drafts that the upload API created or replaced: the ID, the metadata and the message of each. */
     this.uploads = [];
+    /** The send-as addresses of the mailbox. */
+    this.sendAs = [{ sendAsEmail: "me@example.com" }];
+    /** The time zone of the primary calendar. */
+    this.calendarTimeZone = "Pacific/Auckland";
     /** The number of requests that the fake got, as Workers counts subrequests. */
     this.requests = 0;
     this.tokenRequests = 0;
@@ -194,7 +222,11 @@ class FakeGmail {
       if (this.eventsGone) return Response.json({ error: { code: 410, message: "The requested minimum modification time lies too far in the past." } }, { status: 410 });
       return Response.json({ timeZone: "Pacific/Auckland", items: this.events });
     }
+    if (url.pathname === "/calendar/v3/users/me/calendarList/primary" && method === "GET") {
+      return Response.json({ id: "me@example.com", primary: true, timeZone: this.calendarTimeZone });
+    }
     const path = url.pathname.replace("/gmail/v1/users/me", "");
+    if (path === "/settings/sendAs" && method === "GET") return Response.json({ sendAs: this.sendAs });
     if (path === "/labels" && method === "GET") return Response.json({ labels: this.labels });
     if (path === "/labels" && method === "POST") {
       const { name } = JSON.parse(init.body);
@@ -221,12 +253,19 @@ class FakeGmail {
       const [status, body] = this.draft(decodeURIComponent(draft[1]));
       return Response.json(body, { status });
     }
+    if (path === "/upload/drafts" && method === "POST") {
+      const id = `new${this.drafts.size + 1}`;
+      const { metadata, message } = this.upload(id, init);
+      // Like Gmail, the fake keeps the new draft, so that the other draft tools can read it.
+      const payload = toPayload(parseMime(message));
+      const threadId = metadata.message.threadId ?? `${id}-thread`;
+      this.drafts.set(id, { threadId, headers: payload.headers, payload });
+      return Response.json({ id, message: { id: `${id}-m`, threadId } });
+    }
     const upload = /^\/upload\/drafts\/([^/]+)$/.exec(path);
     if (upload && method === "PUT") {
       const id = decodeURIComponent(upload[1]);
-      const boundary = /boundary=(\S+)/.exec(new Headers(init.headers).get("Content-Type"))[1];
-      const [metadata, message] = init.body.split(`--${boundary}`).slice(1, 3).map((p) => p.slice(p.indexOf("\r\n\r\n") + 4).replace(/\r\n$/, ""));
-      this.uploads.push({ id, metadata: JSON.parse(metadata), message });
+      this.upload(id, init);
       return Response.json({ id, message: { id: `${id}-m2`, threadId: this.drafts.get(id).threadId } });
     }
     if (path === "/drafts/send" && method === "POST") {
@@ -261,12 +300,21 @@ class FakeGmail {
     throw new Error(`The fake Gmail has no route for ${method} ${url.href}`);
   }
 
-  /** Returns the status and the JSON of a draft, as Gmail gives it. */
+  /** Records an upload of a draft with the ID from the upload API, and returns its metadata and its message. */
+  upload(id, init) {
+    const boundary = /boundary=(\S+)/.exec(new Headers(init.headers).get("Content-Type"))[1];
+    const [metadata, message] = init.body.split(`--${boundary}`).slice(1, 3).map((p) => p.slice(p.indexOf("\r\n\r\n") + 4).replace(/\r\n$/, ""));
+    const u = { id, metadata: JSON.parse(metadata), message };
+    this.uploads.push(u);
+    return u;
+  }
+
+  /** Returns the status and the JSON of a draft, as Gmail gives it. A draft has a payload, or a plain-text body. */
   draft(id) {
     const d = this.drafts.get(id);
     if (!d) return [404, { error: { code: 404, message: "Requested entity was not found." } }];
     const body = d.body === undefined ? {} : { mimeType: "text/plain", body: { data: Buffer.from(d.body).toString("base64url") } };
-    return [200, { id, message: { id: `${id}-m`, threadId: d.threadId, labelIds: ["DRAFT"], snippet: d.body, payload: { headers: d.headers, ...body } } }];
+    return [200, { id, message: { id: `${id}-m`, threadId: d.threadId, labelIds: ["DRAFT"], snippet: d.body, payload: { headers: d.headers, ...(d.payload ?? body) } } }];
   }
 
   /** Returns message `i` of a thread for send_draft and get_thread, as Gmail gives it. */
@@ -413,6 +461,24 @@ const kinds = (kind) => gmail.batches.filter((b) => b.startsWith(`${kind}:`)).ma
 
 /** Returns Gmail headers from an object of names and values. */
 const headers = (o) => Object.entries(o).map(([name, value]) => ({ name, value }));
+
+/**
+ * Returns the header fields, the plain text and the HTML of the latest message that the upload API got, and the parsed message.
+ * The text and the HTML have LF line ends, not the CRLF line ends of the message.
+ */
+const uploaded = () => {
+  const tree = parseMime(gmail.uploads.at(-1).message);
+  const lf = (part) => part?.text.replace(/\r\n/g, "\n");
+  return { fields: tree.fields, tree, body: lf(partOf(tree, "text/plain")), html: lf(partOf(tree, "text/html")) };
+};
+
+/** The scopes of a mailbox with its calendar linked. */
+const calendarScopes = [
+  "https://www.googleapis.com/auth/gmail.modify",
+  "https://www.googleapis.com/auth/calendar.events",
+  "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+  "https://www.googleapis.com/auth/calendar.events.freebusy",
+].join(" ");
 
 describe("preview", () => {
   test("groups the threads by sender, and does not count as a change", async () => {
@@ -1414,6 +1480,249 @@ describe("tool list version", () => {
   });
 });
 
+describe("reply drafts", () => {
+  const data = (t) => Buffer.from(t).toString("base64url");
+  const latestHtml =
+    "<!DOCTYPE html><html><head><style>p{color:red}</style><script>alert(1)</script></head>" +
+    '<body><p>See you<br>at noon</p><img src="cid:logo@x"><img src="https://example.com/a.png"></body></html>';
+
+  beforeEach(() => {
+    gmail.sendAs = [{ sendAsEmail: "me@example.com" }, { sendAsEmail: "me@alias.example.com" }];
+    gmail.mailThreads.set("r1", [
+      {
+        labels: ["INBOX"],
+        headers: headers({
+          "Message-ID": "<first@example.com>",
+          From: '"Smith, Ana" <Ana@Example.com>',
+          To: "me@example.com",
+          Subject: "Plans",
+          Date: "Mon, 9 Nov 2026 08:30:00 +1300",
+        }),
+        body: "First message",
+      },
+      {
+        labels: ["INBOX"],
+        headers: headers({
+          "Message-ID": "<second@example.com>",
+          References: "<first@example.com>",
+          From: "Bob <bob@example.com>",
+          To: '"Smith, Ana" <ana@example.com>, me@example.com',
+          Cc: "Carol <carol@example.com>, Me <ME@alias.example.com>, ANA@example.com",
+          Subject: "Re: Plans",
+          Date: "Tue, 10 Nov 2026 09:00:00 +1300",
+        }),
+        payload: {
+          mimeType: "multipart/alternative",
+          parts: [
+            { mimeType: "text/plain", body: { data: data("See you\nat noon") } },
+            { mimeType: "text/html", body: { data: data(latestHtml) } },
+          ],
+        },
+      },
+      { labels: ["DRAFT"], headers: headers({ "Message-ID": "<draft@example.com>", From: "me@example.com", To: "eve@evil.example" }) },
+    ]);
+  });
+
+  test("a reply goes to everyone on the latest message, and quotes it under the text, in plain text and in HTML", async () => {
+    const r = await call("create_draft", { reply_to_thread_id: "r1", body: "Works for me.\nThe plan: https://example.com/plan." });
+    assert.equal(r.reply_to_message_id, "r1-1");
+    assert.equal(r.to, "Bob <bob@example.com>");
+    assert.equal(r.cc, '"Smith, Ana" <ana@example.com>, Carol <carol@example.com>');
+    assert.equal(r.subject, "Re: Plans");
+    assert.equal(r.quote, true);
+    assert.deepEqual(gmail.uploads[0].metadata, { message: { threadId: "r1" } });
+    const { fields, body, html } = uploaded();
+    assert.equal(fields["In-Reply-To"], "<second@example.com>");
+    assert.equal(fields.References, "<first@example.com> <second@example.com>");
+    assert.match(fields["Content-Type"], /^multipart\/alternative;/);
+    assert.equal(body, "Works for me.\nThe plan: https://example.com/plan.\n\nOn Tue, 10 Nov 2026 at 09:00, Bob <bob@example.com> wrote:\n\n> See you\n> at noon");
+    assert.ok(
+      html.startsWith(
+        '<div dir="ltr">Works for me.<br>The plan: <a href="https://example.com/plan">https://example.com/plan</a>.</div><br><div class="gmail_quote',
+      ),
+    );
+    assert.match(html, /<div dir="ltr" class="gmail_attr">On Tue, 10 Nov 2026 at 09:00, Bob &lt;bob@example.com&gt; wrote:<br><\/div><blockquote class="gmail_quote"/);
+    assert.match(html, /<style>p\{color:red\}<\/style><p>See you<br>at noon<\/p><img src="https:\/\/example.com\/a.png"><\/blockquote><\/div>$/);
+    assert.doesNotMatch(html, /script|cid:|<body|doctype/i);
+  });
+
+  test("the quote line uses time_zone, else the time zone of the calendar, else the offset of the message", async () => {
+    const line = async (args) => {
+      await call("create_draft", { reply_to_thread_id: "r1", body: "Hi", ...args });
+      return uploaded().body.split("\n")[2];
+    };
+    assert.equal(await line({}), "On Tue, 10 Nov 2026 at 09:00, Bob <bob@example.com> wrote:");
+    assert.equal(await line({ time_zone: "Europe/London" }), "On Mon, 9 Nov 2026 at 20:00, Bob <bob@example.com> wrote:");
+    const scopes = mod.TEST_ACCOUNT.scopes;
+    mod.TEST_ACCOUNT.scopes = calendarScopes;
+    try {
+      gmail.calendarTimeZone = "America/New_York";
+      assert.equal(await line({}), "On Mon, 9 Nov 2026 at 15:00, Bob <bob@example.com> wrote:");
+    } finally {
+      mod.TEST_ACCOUNT.scopes = scopes;
+    }
+    const r = await call("create_draft", { reply_to_thread_id: "r1", body: "Hi", time_zone: "Mars/Olympus" });
+    assert.match(r.text, /"Mars\/Olympus" is not an IANA time zone/);
+    assert.equal(gmail.uploads.length, 3);
+  });
+
+  test("reply_to_message_id answers an earlier message, and reply_all false replies only to the sender", async () => {
+    const r = await call("create_draft", { reply_to_message_id: "r1-0", body: "Thanks", reply_all: false });
+    assert.equal(r.thread_id, "r1");
+    assert.equal(r.to, '"Smith, Ana" <Ana@Example.com>');
+    assert.equal(r.cc, null);
+    assert.equal(r.subject, "Re: Plans");
+    const { fields, body } = uploaded();
+    assert.equal(fields["In-Reply-To"], "<first@example.com>");
+    assert.equal(body, "Thanks\n\nOn Mon, 9 Nov 2026 at 08:30, Smith, Ana <ana@example.com> wrote:\n\n> First message");
+  });
+
+  test("refuses a draft, and a message in another thread", async () => {
+    assert.match((await call("create_draft", { reply_to_message_id: "r1-2", body: "x" })).text, /is a draft/);
+    assert.match((await call("create_draft", { reply_to_thread_id: "t1", reply_to_message_id: "r1-0", body: "x" })).text, /not in reply_to_thread_id/);
+    assert.deepEqual(gmail.uploads, []);
+  });
+
+  test("without a quote, and for a new message, the draft is plain text", async () => {
+    await call("create_draft", { reply_to_thread_id: "r1", body: "Thanks", quote: false });
+    assert.match(uploaded().fields["Content-Type"], /^text\/plain;/);
+    assert.equal(uploaded().body, "Thanks");
+    const r = await call("create_draft", { to: "dan@example.com", subject: "Hello", body: "Hi Dan" });
+    assert.equal(r.reply_to_message_id, null);
+    assert.equal(r.quote, false);
+    assert.deepEqual(gmail.uploads.at(-1).metadata, { message: {} });
+    assert.equal(uploaded().body, "Hi Dan");
+    assert.equal(uploaded().html, undefined);
+  });
+
+  test("a reply to a message from a send-as address of the mailbox goes to the recipients of that message", async () => {
+    gmail.mailThreads.set("r2", [
+      {
+        labels: ["SENT"],
+        headers: headers({ "Message-ID": "<mine@example.com>", From: "Me <me@alias.example.com>", To: "dan@example.com", Cc: "erin@example.com", Subject: "Agenda" }),
+        body: "Agenda attached",
+      },
+    ]);
+    const r = await call("create_draft", { reply_to_thread_id: "r2", body: "One more item" });
+    assert.equal(r.to, "dan@example.com");
+    assert.equal(r.cc, "erin@example.com");
+  });
+
+  test("send_draft sends a reply to all with only Allow replies", async () => {
+    mod.TEST_ACCOUNT.allow_send = 0;
+    mod.TEST_ACCOUNT.allow_reply_email = 1;
+    try {
+      const r = await call("create_draft", { reply_to_thread_id: "r1", body: "Works for me." });
+      const sent = await call("send_draft", { draft_id: r.draft_id });
+      assert.ok(!sent.isError, sent.text);
+      assert.deepEqual(gmail.sent, [r.draft_id]);
+    } finally {
+      mod.TEST_ACCOUNT.allow_reply_email = 0;
+    }
+  });
+
+  test("update_draft replaces the text above the quote, and keeps the quote", async () => {
+    const { draft_id } = await call("create_draft", { reply_to_thread_id: "r1", body: "Old text" });
+    const before = uploaded();
+    const r = await call("update_draft", { draft_id, body: "New text" });
+    assert.equal(r.quote, true);
+    const after = uploaded();
+    assert.equal(after.body, before.body.replace("Old text", "New text"));
+    assert.equal(after.html, before.html.replace("Old text", "New text"));
+  });
+
+  test("update_draft without body keeps the HTML, and quote false removes the quote", async () => {
+    const { draft_id } = await call("create_draft", { reply_to_thread_id: "r1", body: "My text" });
+    const created = uploaded();
+    await call("update_draft", { draft_id, subject: "Re: Plans for Friday" });
+    assert.equal(uploaded().body, created.body);
+    assert.equal(uploaded().html, created.html);
+    const r = await call("update_draft", { draft_id, quote: false });
+    assert.equal(r.quote, false);
+    assert.equal(uploaded().body, "My text");
+    assert.equal(uploaded().html, '<div dir="ltr">My text</div>');
+  });
+});
+
+describe("create_forward_draft", () => {
+  const data = (t) => Buffer.from(t).toString("base64url");
+
+  beforeEach(() => {
+    gmail.attachments.set("logo", data("PNG"));
+    gmail.attachments.set("pdf", data("%PDF"));
+    gmail.mailThreads.set("f2", [
+      {
+        labels: ["INBOX"],
+        headers: headers({ "Message-ID": "<news@example.com>", From: "Ana <ana@example.com>", To: "me@example.com", Subject: "News", Date: "Tue, 10 Nov 2026 09:00:00 +1300" }),
+        payload: {
+          mimeType: "multipart/mixed",
+          parts: [
+            {
+              mimeType: "multipart/related",
+              parts: [
+                {
+                  mimeType: "multipart/alternative",
+                  parts: [
+                    { mimeType: "text/plain", body: { data: data("Big news") } },
+                    { mimeType: "text/html", body: { data: data('<p><b>Big</b> news</p><img src="cid:logo@x">') } },
+                  ],
+                },
+                { partId: "1", mimeType: "image/png", filename: "logo.png", headers: headers({ "Content-ID": "<logo@x>" }), body: { attachmentId: "logo", size: 3 } },
+              ],
+            },
+            { partId: "2", mimeType: "application/pdf", filename: "report.pdf", headers: [], body: { attachmentId: "pdf", size: 4 } },
+          ],
+        },
+      },
+    ]);
+  });
+
+  /** Returns the media types of a message from parseMime, with the types of the parts of each multipart part. */
+  const types = (n) => (n.parts ? [n.fields["Content-Type"].split(";")[0], n.parts.map(types)] : n.fields["Content-Type"].split(";")[0]);
+
+  test("forwards the message with its formatting, its inline image and its attachment", async () => {
+    const r = await call("create_forward_draft", { message_id: "f2-0", to: "dan@example.com", note: "FYI" });
+    assert.equal(r.subject, "Fwd: News");
+    assert.deepEqual(r.attachments, ["logo.png", "report.pdf"]);
+    const { fields, tree, body, html } = uploaded();
+    assert.equal(fields["In-Reply-To"], "<news@example.com>");
+    assert.deepEqual(types(tree), ["multipart/mixed", [["multipart/related", [["multipart/alternative", ["text/plain", "text/html"]], "image/png"]], "application/pdf"]]);
+    const logo = partOf(tree, "image/png");
+    assert.equal(logo.fields["Content-ID"], "<logo@x>");
+    assert.match(logo.fields["Content-Disposition"], /^inline;/);
+    assert.equal(logo.text, "PNG");
+    assert.match(partOf(tree, "application/pdf").fields["Content-Disposition"], /^attachment;/);
+    assert.equal(
+      body,
+      "FYI\n\n---------- Forwarded message ---------\nFrom: Ana <ana@example.com>\nDate: Tue, 10 Nov 2026 09:00:00 +1300\nSubject: News\nTo: me@example.com\n\nBig news",
+    );
+    assert.equal(
+      html,
+      '<div dir="ltr">FYI</div><br><div class="gmail_quote gmail_quote_container"><div dir="ltr" class="gmail_attr">---------- Forwarded message ---------<br>' +
+        "From: Ana &lt;ana@example.com&gt;<br>Date: Tue, 10 Nov 2026 09:00:00 +1300<br>Subject: News<br>To: me@example.com<br></div><br><br>" +
+        '<p><b>Big</b> news</p><img src="cid:logo@x"></div>',
+    );
+  });
+
+  test("without attachments, the forward does not have the inline image", async () => {
+    await call("create_forward_draft", { message_id: "f2-0", to: "dan@example.com", include_attachments: false });
+    const { tree, body, html } = uploaded();
+    assert.deepEqual(types(tree), ["multipart/alternative", ["text/plain", "text/html"]]);
+    assert.ok(body.startsWith("---------- Forwarded message ---------\n"));
+    assert.ok(html.endsWith("<br><br><p><b>Big</b> news</p></div>"));
+  });
+
+  test("update_draft of a forward replaces the note, and keeps the forwarded message and its inline image", async () => {
+    const { draft_id } = await call("create_forward_draft", { message_id: "f2-0", to: "dan@example.com", note: "FYI" });
+    const before = uploaded();
+    await call("update_draft", { draft_id, body: "Have a look" });
+    const after = uploaded();
+    assert.deepEqual(types(after.tree), types(before.tree));
+    assert.equal(after.body, before.body.replace("FYI", "Have a look"));
+    assert.equal(after.html, before.html.replace("FYI", "Have a look"));
+  });
+});
+
 describe("drafts", () => {
   beforeEach(() => {
     gmail.drafts.set("d1", {
@@ -1430,14 +1739,6 @@ describe("drafts", () => {
     });
     gmail.drafts.set("d2", { threadId: "r2", headers: headers({ To: "carol@example.com", Subject: "Invoice" }), body: "Hello" });
   });
-
-  /** Returns the headers and the decoded body of the message that the upload API got. */
-  const uploaded = () => {
-    const [{ message }] = gmail.uploads;
-    const [head, ...rest] = message.split("\r\n\r\n");
-    const fields = Object.fromEntries(head.split("\r\n").map((l) => [l.slice(0, l.indexOf(":")), l.slice(l.indexOf(":") + 2)]));
-    return { fields, body: Buffer.from(rest.join("").replace(/\r\n/g, ""), "base64").toString() };
-  };
 
   test("list_drafts gives the recipients, subject and snippet of each draft", async () => {
     const r = await call("list_drafts", {});
@@ -1499,12 +1800,6 @@ describe("drafts", () => {
 });
 
 describe("list_event_changes", () => {
-  const calendarScopes = [
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/calendar.events",
-    "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
-    "https://www.googleapis.com/auth/calendar.events.freebusy",
-  ].join(" ");
   let scopes;
   beforeEach(() => {
     scopes = mod.TEST_ACCOUNT.scopes;
@@ -1685,6 +1980,20 @@ describe("addressList", () => {
     assert.deepEqual(mod.addressList('"x@y.com" <z@example.com>'), ["z@example.com"]);
     assert.deepEqual(mod.addressList(undefined), []);
     assert.deepEqual(mod.addressList("undisclosed-recipients:;"), []);
+  });
+
+  test("mailboxes keeps the display names, and splits only outside quotes", () => {
+    assert.deepEqual(mod.mailboxes('"Smith, Ana" <Ana@Example.com>, bob@example.com; Carol (work, home) <carol@example.com>, "x@y.com" <z@example.com>'), [
+      { text: '"Smith, Ana" <Ana@Example.com>', name: "Smith, Ana", address: "ana@example.com" },
+      { text: "bob@example.com", name: "", address: "bob@example.com" },
+      { text: "Carol (work, home) <carol@example.com>", name: "Carol (work, home)", address: "carol@example.com" },
+      { text: '"x@y.com" <z@example.com>', name: "x@y.com", address: "z@example.com" },
+    ]);
+    assert.deepEqual(mod.mailboxes("undisclosed-recipients:;"), []);
+    assert.deepEqual(
+      mod.mailboxes('"Smith, Ana <ana@example.com>, bob@example.com').map((m) => m.address),
+      ["ana@example.com", "bob@example.com"],
+    );
   });
 });
 
